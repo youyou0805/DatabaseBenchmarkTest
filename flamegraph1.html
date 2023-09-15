@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<style>
+	body {margin: 0; padding: 10px; background-color: #ffffff}
+	h1 {margin: 5px 0 0 0; font-size: 18px; font-weight: normal; text-align: center}
+	header {margin: -24px 0 5px 0; line-height: 24px}
+	button {font: 12px sans-serif; cursor: pointer}
+	p {margin: 5px 0 5px 0}
+	a {color: #0366d6}
+	#hl {position: absolute; display: none; overflow: hidden; white-space: nowrap; pointer-events: none; background-color: #ffffe0; outline: 1px solid #ffc000; height: 15px}
+	#hl span {padding: 0 3px 0 3px}
+	#status {overflow: hidden; white-space: nowrap}
+	#match {overflow: hidden; white-space: nowrap; display: none; float: right; text-align: right}
+	#reset {cursor: pointer}
+	#canvas {width: 100%; height: 672px}
+</style>
+</head>
+<body style='font: 12px Verdana, sans-serif'>
+<h1>CPU profile</h1>
+<header style='text-align: left'><button id='reverse' title='Reverse'>&#x1f53b;</button>&nbsp;&nbsp;<button id='search' title='Search'>&#x1f50d;</button></header>
+<header style='text-align: right'>Produced by <a href='https://github.com/jvm-profiling-tools/async-profiler'>async-profiler</a></header>
+<canvas id='canvas'></canvas>
+<div id='hl'><span></span></div>
+<p id='match'>Matched: <span id='matchval'></span> <span id='reset' title='Clear'>&#x274c;</span></p>
+<p id='status'>&nbsp;</p>
+<script>
+	// Copyright 2020 Andrei Pangin
+	// Licensed under the Apache License, Version 2.0.
+	'use strict';
+	var root, rootLevel, px, pattern;
+	var reverse = false;
+	const levels = Array(42);
+	for (let h = 0; h < levels.length; h++) {
+		levels[h] = [];
+	}
+
+	const canvas = document.getElementById('canvas');
+	const c = canvas.getContext('2d');
+	const hl = document.getElementById('hl');
+	const status = document.getElementById('status');
+
+	const canvasWidth = canvas.offsetWidth;
+	const canvasHeight = canvas.offsetHeight;
+	canvas.style.width = canvasWidth + 'px';
+	canvas.width = canvasWidth * (devicePixelRatio || 1);
+	canvas.height = canvasHeight * (devicePixelRatio || 1);
+	if (devicePixelRatio) c.scale(devicePixelRatio, devicePixelRatio);
+	c.font = document.body.style.font;
+
+	const palette = [
+		[0xb2e1b2, 20, 20, 20],
+		[0x50e150, 30, 30, 30],
+		[0x50cccc, 30, 30, 30],
+		[0xe15a5a, 30, 40, 40],
+		[0xc8c83c, 30, 30, 10],
+		[0xe17d00, 30, 30,  0],
+		[0xcce880, 20, 20, 20],
+	];
+
+	function getColor(p) {
+		const v = Math.random();
+		return '#' + (p[0] + ((p[1] * v) << 16 | (p[2] * v) << 8 | (p[3] * v))).toString(16);
+	}
+
+	function f(level, left, width, type, title, inln, c1, int) {
+		levels[level].push({left: left, width: width, color: getColor(palette[type]), title: title,
+			details: (int ? ', int=' + int : '') + (c1 ? ', c1=' + c1 : '') + (inln ? ', inln=' + inln : '')
+		});
+	}
+
+	function samples(n) {
+		return n === 1 ? '1 sample' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' samples';
+	}
+
+	function pct(a, b) {
+		return a >= b ? '100' : (100 * a / b).toFixed(2);
+	}
+
+	function findFrame(frames, x) {
+		let left = 0;
+		let right = frames.length - 1;
+
+		while (left <= right) {
+			const mid = (left + right) >>> 1;
+			const f = frames[mid];
+
+			if (f.left > x) {
+				right = mid - 1;
+			} else if (f.left + f.width <= x) {
+				left = mid + 1;
+			} else {
+				return f;
+			}
+		}
+
+		if (frames[left] && (frames[left].left - x) * px < 0.5) return frames[left];
+		if (frames[right] && (x - (frames[right].left + frames[right].width)) * px < 0.5) return frames[right];
+
+		return null;
+	}
+
+	function search(r) {
+		if (r === true && (r = prompt('Enter regexp to search:', '')) === null) {
+			return;
+		}
+
+		pattern = r ? RegExp(r) : undefined;
+		const matched = render(root, rootLevel);
+		document.getElementById('matchval').textContent = pct(matched, root.width) + '%';
+		document.getElementById('match').style.display = r ? 'inherit' : 'none';
+	}
+
+	function render(newRoot, newLevel) {
+		if (root) {
+			c.fillStyle = '#ffffff';
+			c.fillRect(0, 0, canvasWidth, canvasHeight);
+		}
+
+		root = newRoot || levels[0][0];
+		rootLevel = newLevel || 0;
+		px = canvasWidth / root.width;
+
+		const x0 = root.left;
+		const x1 = x0 + root.width;
+		const marked = [];
+
+		function mark(f) {
+			return marked[f.left] >= f.width || (marked[f.left] = f.width);
+		}
+
+		function totalMarked() {
+			let total = 0;
+			let left = 0;
+			Object.keys(marked).sort(function(a, b) { return a - b; }).forEach(function(x) {
+				if (+x >= left) {
+					total += marked[x];
+					left = +x + marked[x];
+				}
+			});
+			return total;
+		}
+
+		function drawFrame(f, y, alpha) {
+			if (f.left < x1 && f.left + f.width > x0) {
+				c.fillStyle = pattern && f.title.match(pattern) && mark(f) ? '#ee00ee' : f.color;
+				c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+
+				if (f.width * px >= 21) {
+					const chars = Math.floor(f.width * px / 7);
+					const title = f.title.length <= chars ? f.title : f.title.substring(0, chars - 2) + '..';
+					c.fillStyle = '#000000';
+					c.fillText(title, Math.max(f.left - x0, 0) * px + 3, y + 12, f.width * px - 6);
+				}
+
+				if (alpha) {
+					c.fillStyle = 'rgba(255, 255, 255, 0.5)';
+					c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+				}
+			}
+		}
+
+		for (let h = 0; h < levels.length; h++) {
+			const y = reverse ? h * 16 : canvasHeight - (h + 1) * 16;
+			const frames = levels[h];
+			for (let i = 0; i < frames.length; i++) {
+				drawFrame(frames[i], y, h < rootLevel);
+			}
+		}
+
+		return totalMarked();
+	}
+
+	canvas.onmousemove = function() {
+		const h = Math.floor((reverse ? event.offsetY : (canvasHeight - event.offsetY)) / 16);
+		if (h >= 0 && h < levels.length) {
+			const f = findFrame(levels[h], event.offsetX / px + root.left);
+			if (f) {
+				if (f != root) getSelection().removeAllRanges();
+				hl.style.left = (Math.max(f.left - root.left, 0) * px + canvas.offsetLeft) + 'px';
+				hl.style.width = (Math.min(f.width, root.width) * px) + 'px';
+				hl.style.top = ((reverse ? h * 16 : canvasHeight - (h + 1) * 16) + canvas.offsetTop) + 'px';
+				hl.firstChild.textContent = f.title;
+				hl.style.display = 'block';
+				canvas.title = f.title + '\n(' + samples(f.width) + f.details + ', ' + pct(f.width, levels[0][0].width) + '%)';
+				canvas.style.cursor = 'pointer';
+				canvas.onclick = function() {
+					if (f != root) {
+						render(f, h);
+						canvas.onmousemove();
+					}
+				};
+				status.textContent = 'Function: ' + canvas.title;
+				return;
+			}
+		}
+		canvas.onmouseout();
+	}
+
+	canvas.onmouseout = function() {
+		hl.style.display = 'none';
+		status.textContent = '\xa0';
+		canvas.title = '';
+		canvas.style.cursor = '';
+		canvas.onclick = '';
+	}
+
+	canvas.ondblclick = function() {
+		getSelection().selectAllChildren(hl);
+	}
+
+	document.getElementById('reverse').onclick = function() {
+		reverse = !reverse;
+		render();
+	}
+
+	document.getElementById('search').onclick = function() {
+		search(true);
+	}
+
+	document.getElementById('reset').onclick = function() {
+		search(false);
+	}
+
+	window.onkeydown = function() {
+		if (event.ctrlKey && event.keyCode === 70) {
+			event.preventDefault();
+			search(true);
+		} else if (event.keyCode === 27) {
+			search(false);
+		}
+	}
+
+f(0,0,13,3,'all')
+f(1,0,1,3,'[no_Java_frame]')
+f(1,1,3,1,'org/openjdk/jmh/Main.main')
+f(2,1,3,1,'org/openjdk/jmh/runner/Runner.run')
+f(3,1,3,1,'org/openjdk/jmh/runner/Runner.internalRun')
+f(4,1,3,1,'org/openjdk/jmh/runner/Runner.runBenchmarks')
+f(5,1,3,1,'org/openjdk/jmh/runner/Runner.runSeparate')
+f(6,1,3,1,'org/openjdk/jmh/runner/format/TextReportFormat.endBenchmark')
+f(7,1,3,1,'org/openjdk/jmh/results/Result.extendedInfo')
+f(8,1,3,1,'org/openjdk/jmh/results/Result.simpleExtendedInfo')
+f(9,1,3,1,'org/openjdk/jmh/results/Result.getScoreConfidence')
+f(10,1,3,1,'org/openjdk/jmh/util/AbstractStatistics.getConfidenceIntervalAt')
+f(11,1,1,1,'java/lang/ClassLoader.loadClass')
+f(12,1,1,1,'sun/misc/Launcher$AppClassLoader.loadClass')
+f(13,1,1,1,'java/lang/ClassLoader.loadClass')
+f(14,1,1,1,'java/net/URLClassLoader.findClass')
+f(15,1,1,1,'java/security/AccessController.doPrivileged')
+f(16,1,1,1,'java/net/URLClassLoader$1.run')
+f(17,1,1,1,'java/net/URLClassLoader$1.run')
+f(18,1,1,1,'java/net/URLClassLoader.access$100')
+f(19,1,1,1,'java/net/URLClassLoader.defineClass')
+f(20,1,1,1,'java/security/SecureClassLoader.defineClass')
+f(21,1,1,1,'java/lang/ClassLoader.defineClass')
+f(22,1,1,1,'java/lang/ClassLoader.defineClass1')
+f(23,1,1,1,'java/lang/ClassLoader.loadClass')
+f(24,1,1,1,'sun/misc/Launcher$AppClassLoader.loadClass')
+f(25,1,1,1,'java/lang/ClassLoader.loadClass')
+f(26,1,1,1,'java/net/URLClassLoader.findClass')
+f(27,1,1,1,'java/security/AccessController.doPrivileged')
+f(28,1,1,1,'java/net/URLClassLoader$1.run')
+f(29,1,1,1,'java/net/URLClassLoader$1.run')
+f(30,1,1,1,'java/net/URLClassLoader.access$100')
+f(31,1,1,1,'java/net/URLClassLoader.defineClass')
+f(32,1,1,1,'java/security/SecureClassLoader.defineClass')
+f(33,1,1,1,'java/lang/ClassLoader.defineClass')
+f(34,1,1,0,'java/lang/ClassLoader.defineClass1',0,0,1)
+f(35,1,1,3,'Java_java_lang_ClassLoader_defineClass1')
+f(36,1,1,3,'JVM_DefineClassWithSource')
+f(37,1,1,3,'jvm_define_class_common(JNIEnv_*, char const*, _jobject*, signed char const*, int, _jobject*, char const*, unsigned char, Thread*)')
+f(38,1,1,4,'SystemDictionary::resolve_from_stream(Symbol*, Handle, Handle, ClassFileStream*, bool, Thread*)')
+f(39,1,1,4,'ClassFileParser::parseClassFile(Symbol*, ClassLoaderData*, Handle, KlassHandle, GrowableArray<Handle>*, TempNewSymbol&, bool, Thread*)')
+f(40,1,1,4,'ClassFileParser::parse_methods(bool, AccessFlags*, bool*, bool*, Thread*)')
+f(41,1,1,4,'ClassFileParser::parse_method(bool, AccessFlags*, Thread*)')
+f(11,2,1,1,'org/apache/commons/math3/distribution/AbstractRealDistribution.inverseCumulativeProbability')
+f(12,2,1,1,'org/apache/commons/math3/analysis/solvers/UnivariateSolverUtils.solve')
+f(13,2,1,1,'org/apache/commons/math3/analysis/solvers/BaseAbstractUnivariateSolver.solve')
+f(14,2,1,1,'org/apache/commons/math3/analysis/solvers/BaseAbstractUnivariateSolver.solve')
+f(15,2,1,1,'org/apache/commons/math3/analysis/solvers/BrentSolver.doSolve')
+f(16,2,1,1,'org/apache/commons/math3/analysis/solvers/BaseAbstractUnivariateSolver.computeObjectiveValue')
+f(17,2,1,1,'org/apache/commons/math3/distribution/AbstractRealDistribution$1.value')
+f(18,2,1,0,'org/apache/commons/math3/distribution/TDistribution.cumulativeProbability',0,0,1)
+f(19,2,1,4,'InterpreterRuntime::resolve_invoke(JavaThread*, Bytecodes::Code)')
+f(20,2,1,4,'LinkResolver::resolve_invoke(CallInfo&, Handle, constantPoolHandle, int, Bytecodes::Code, Thread*)')
+f(21,2,1,4,'LinkResolver::resolve_invokestatic(CallInfo&, constantPoolHandle, int, Thread*)')
+f(22,2,1,4,'LinkResolver::resolve_static_call(CallInfo&, KlassHandle&, Symbol*, Symbol*, KlassHandle, bool, bool, Thread*)')
+f(23,2,1,4,'InstanceKlass::initialize(Thread*)')
+f(24,2,1,4,'InstanceKlass::initialize_impl(instanceKlassHandle, Thread*)')
+f(25,2,1,4,'InstanceKlass::link_class_impl(instanceKlassHandle, bool, Thread*)')
+f(26,2,1,4,'Verifier::verify(instanceKlassHandle, Verifier::Mode, bool, Thread*)')
+f(27,2,1,4,'Verifier::inference_verify(instanceKlassHandle, char*, unsigned long, Thread*)')
+f(28,2,1,3,'VerifyClassForMajorVersion')
+f(29,2,1,3,'verify_method')
+f(30,2,1,3,'run_dataflow')
+f(31,2,1,3,'pop_stack')
+f(32,2,1,3,'JVM_GetCPMethodSignatureUTF')
+f(11,3,1,1,'org/apache/commons/math3/distribution/TDistribution.<init>')
+f(12,3,1,1,'org/apache/commons/math3/distribution/TDistribution.<init>')
+f(13,3,1,1,'org/apache/commons/math3/distribution/TDistribution.<init>')
+f(14,3,1,1,'org/apache/commons/math3/distribution/AbstractRealDistribution.<init>')
+f(15,3,1,1,'org/apache/commons/math3/random/RandomDataImpl.<init>')
+f(16,3,1,1,'java/lang/ClassLoader.loadClass')
+f(17,3,1,1,'sun/misc/Launcher$AppClassLoader.loadClass')
+f(18,3,1,1,'java/lang/ClassLoader.loadClass')
+f(19,3,1,1,'java/net/URLClassLoader.findClass')
+f(20,3,1,1,'java/security/AccessController.doPrivileged')
+f(21,3,1,1,'java/net/URLClassLoader$1.run')
+f(22,3,1,1,'java/net/URLClassLoader$1.run')
+f(23,3,1,1,'sun/misc/URLClassPath.getResource')
+f(24,3,1,1,'sun/misc/URLClassPath$JarLoader.getResource')
+f(25,3,1,1,'sun/misc/URLClassPath$JarLoader.checkResource')
+f(26,3,1,1,'java/net/URL.<init>')
+f(27,3,1,0,'java/net/URL.<init>',0,0,1)
+f(1,4,3,1,'org/openjdk/jmh/runner/link/BinaryLinkServer$Handler.run')
+f(2,4,2,1,'java/io/ObjectInputStream.readObject')
+f(3,4,2,1,'java/io/ObjectInputStream.readObject')
+f(4,4,2,1,'java/io/ObjectInputStream.readObject0')
+f(5,4,2,1,'java/io/ObjectInputStream.readOrdinaryObject')
+f(6,4,1,1,'java/io/ObjectInputStream.readClassDesc')
+f(7,4,1,1,'java/io/ObjectInputStream.readHandle')
+f(8,4,1,0,'java/io/ObjectInputStream$BlockDataInputStream.readInt',0,0,1)
+f(9,4,1,1,'I2C/C2I adapters')
+f(6,5,1,1,'java/io/ObjectInputStream.readSerialData')
+f(7,5,1,1,'java/io/ObjectInputStream.defaultReadFields')
+f(8,5,1,1,'java/io/ObjectInputStream.readObject0')
+f(9,5,1,1,'java/io/ObjectInputStream.readArray')
+f(10,5,1,1,'java/io/ObjectInputStream.readObject0')
+f(11,5,1,1,'java/io/ObjectInputStream.readOrdinaryObject')
+f(12,5,1,1,'java/io/ObjectInputStream.readSerialData')
+f(13,5,1,1,'java/io/ObjectInputStream.defaultReadFields')
+f(14,5,1,1,'java/io/ObjectInputStream.readObject0')
+f(15,5,1,1,'java/io/ObjectInputStream.readOrdinaryObject')
+f(16,5,1,1,'java/io/ObjectInputStream.readSerialData')
+f(17,5,1,1,'java/io/ObjectInputStream.defaultReadFields')
+f(18,5,1,1,'java/io/ObjectInputStream.readObject0')
+f(19,5,1,1,'java/io/ObjectInputStream.readOrdinaryObject')
+f(20,5,1,1,'java/io/ObjectInputStream.readClassDesc')
+f(21,5,1,1,'java/io/ObjectInputStream.readNonProxyDesc')
+f(22,5,1,1,'java/io/ObjectInputStream.readClassDesc')
+f(23,5,1,1,'java/io/ObjectInputStream.readNonProxyDesc')
+f(24,5,1,1,'java/io/ObjectStreamClass.initNonProxy')
+f(25,5,1,1,'java/io/ObjectStreamClass.lookup')
+f(26,5,1,1,'java/io/ObjectStreamClass.<init>')
+f(27,5,1,1,'java/security/AccessController.doPrivileged')
+f(28,5,1,1,'java/io/ObjectStreamClass$3.run')
+f(29,5,1,1,'java/io/ObjectStreamClass$3.run')
+f(30,5,1,1,'java/io/ObjectStreamClass.access$1500')
+f(31,5,1,1,'java/io/ObjectStreamClass.getSerializableConstructor')
+f(32,5,1,1,'sun/reflect/ReflectionFactory.newConstructorForSerialization')
+f(33,5,1,1,'sun/reflect/ReflectionFactory.generateConstructor')
+f(34,5,1,1,'sun/reflect/MethodAccessorGenerator.generateSerializationConstructor')
+f(35,5,1,1,'sun/reflect/MethodAccessorGenerator.generate')
+f(36,5,1,1,'java/security/AccessController.doPrivileged')
+f(37,5,1,1,'sun/reflect/MethodAccessorGenerator$1.run')
+f(38,5,1,1,'sun/reflect/MethodAccessorGenerator$1.run')
+f(39,5,1,1,'sun/reflect/ClassDefiner.defineClass')
+f(40,5,1,1,'sun/misc/Unsafe.defineClass')
+f(41,5,1,3,'_int_malloc')
+f(2,6,1,1,'org/openjdk/jmh/runner/link/BinaryLinkServer$Handler.handleOutputFormat')
+f(3,6,1,1,'java/lang/reflect/Method.invoke')
+f(4,6,1,1,'sun/reflect/DelegatingMethodAccessorImpl.invoke')
+f(5,6,1,1,'sun/reflect/NativeMethodAccessorImpl.invoke')
+f(6,6,1,1,'sun/reflect/NativeMethodAccessorImpl.invoke0')
+f(7,6,1,1,'org/openjdk/jmh/runner/format/TextReportFormat.iterationResult')
+f(8,6,1,1,'java/io/PrintStream.print')
+f(9,6,1,1,'java/io/PrintStream.write')
+f(10,6,1,1,'java/io/BufferedWriter.flushBuffer')
+f(11,6,1,1,'java/io/OutputStreamWriter.write')
+f(12,6,1,1,'sun/nio/cs/StreamEncoder.write')
+f(13,6,1,0,'sun/nio/cs/StreamEncoder.implWrite',0,0,1)
+f(1,7,6,3,'start_thread')
+f(2,7,6,3,'java_start(Thread*)')
+f(3,7,4,4,'JavaThread::thread_main_inner()')
+f(4,7,4,4,'CompileBroker::compiler_thread_loop()')
+f(5,7,4,4,'CompileBroker::invoke_compiler_on_method(CompileTask*)')
+f(6,7,4,4,'Compiler::compile_method(ciEnv*, ciMethod*, int)')
+f(7,7,4,4,'Compilation::Compilation(AbstractCompiler*, ciEnv*, ciMethod*, int, BufferBlob*)')
+f(8,7,4,4,'Compilation::compile_method()')
+f(9,7,4,4,'Compilation::compile_java_method()')
+f(10,7,3,4,'Compilation::build_hir()')
+f(11,7,1,4,'IR::IR(Compilation*, ciMethod*, int)')
+f(12,7,1,4,'GraphBuilder::GraphBuilder(Compilation*, IRScope*)')
+f(13,7,1,4,'GraphBuilder::iterate_all_blocks(bool)')
+f(14,7,1,4,'GraphBuilder::iterate_bytecodes_for_block(int)')
+f(15,7,1,4,'GraphBuilder::access_field(Bytecodes::Code)')
+f(16,7,1,4,'ciBytecodeStream::get_field(bool&)')
+f(17,7,1,4,'ciEnv::get_field_by_index(ciInstanceKlass*, int)')
+f(18,7,1,4,'ciEnv::get_field_by_index_impl(ciInstanceKlass*, int)')
+f(19,7,1,4,'ciField::ciField(ciInstanceKlass*, int)')
+f(20,7,1,4,'InstanceKlass::find_field(Symbol*, Symbol*, fieldDescriptor*) const')
+f(21,7,1,4,'InstanceKlass::find_local_field(Symbol*, Symbol*, fieldDescriptor*) const')
+f(11,8,1,4,'IR::eliminate_null_checks()')
+f(12,8,1,4,'Optimizer::eliminate_null_checks()')
+f(13,8,1,4,'NullCheckEliminator::iterate_one(BlockBegin*)')
+f(11,9,1,4,'LoadField::visit(InstructionVisitor*)')
+f(10,10,1,4,'Compilation::emit_lir()')
+f(11,10,1,4,'BlockList::iterate_forward(BlockClosure*)')
+f(12,10,1,4,'LIRGenerator::block_do(BlockBegin*)')
+f(13,10,1,4,'LIRGenerator::do_Goto(Goto*)')
+f(14,10,1,4,'LIRGenerator::move_to_phi(ValueStack*)')
+f(15,10,1,4,'PhiResolverState::reset(int)')
+f(16,10,1,4,'ResourceArray::expand(unsigned long, int, int&)')
+f(17,10,1,4,'ThreadLocalStorage::is_initialized()')
+f(3,11,2,4,'WatcherThread::run()')
+f(4,11,2,4,'WatcherThread::sleep() const')
+f(5,11,2,4,'Monitor::wait(bool, long, bool)')
+f(6,11,1,4,'Thread::muxAcquire(long volatile*, char const*)')
+f(6,12,1,4,'os::PlatformEvent::park(long)')
+
+search();
+</script></body></html>
