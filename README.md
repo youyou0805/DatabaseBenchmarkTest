@@ -133,14 +133,16 @@ public class DatabaseBenchmarkTest {
 
 ## **JMH测试结果**
 
-| Benchmark                          | (requestCount) | (testOption) | (threadCount) | Mode  | Cnt  | Score | Error   | Units |
-| ---------------------------------- | -------------- | ------------ | ------------- | ----- | ---- | ----- | ------- | ----- |
-| DatabaseBenchmarkTest.testDatabase | 100000         | 1            | 10000         | avgt  | 5    | 1.333 | ± 0.677 | s/op  |
-| DatabaseBenchmarkTest.testDatabase | 100000         | 2            | 10000         | avgt  | 5    | 1.449 | ± 0.570 | s/op  |
-| DatabaseBenchmarkTest.testDatabase | 300000         | 1            | 30000         | avgt  | 5    | 4.385 | ± 1.326 | s/op  |
-| DatabaseBenchmarkTest.testDatabase | 300000         | 2            | 30000         | avgt  | 5    | 5.128 | ± 0.300 | s/op  |
-| DatabaseBenchmarkTest.testDatabase | 100000         | 1            | 10000         | thrpt | 5    | 0.654 | ± 0.201 | ops/s |
-| DatabaseBenchmarkTest.testDatabase | 100000         | 2            | 10000         | thrpt | 5    | 0.616 | ± 0.128 | ops/s |
+| Benchmark                          | (requestCount) | (testOption) | (threadCount) | Mode  | Cnt  | Score | Error  | Units |
+| ---------------------------------- | -------------- | ------------ | ------------- | ----- | ---- | ----- | ------ | ----- |
+| DatabaseBenchmarkTest.testDatabase | 100000         | 1            | 10000         | avgt  | 5    | 1.333 | ±0.677 | s/op  |
+| DatabaseBenchmarkTest.testDatabase | 100000         | 2            | 10000         | avgt  | 5    | 1.449 | ±0.570 | s/op  |
+| DatabaseBenchmarkTest.testDatabase | 300000         | 1            | 30000         | avgt  | 5    | 4.385 | ±1.326 | s/op  |
+| DatabaseBenchmarkTest.testDatabase | 300000         | 2            | 30000         | avgt  | 5    | 5.128 | ±0.300 | s/op  |
+| DatabaseBenchmarkTest.testDatabase | 100000         | 1            | 10000         | thrpt | 5    | 0.654 | ±0.201 | ops/s |
+| DatabaseBenchmarkTest.testDatabase | 100000         | 2            | 10000         | thrpt | 5    | 0.616 | ±0.128 | ops/s |
+| DatabaseBenchmarkTest.testDatabase | 300000         | 1            | 30000         | thrpt | 5    | 0.200 | ±0.045 | ops/s |
+| DatabaseBenchmarkTest.testDatabase | 300000         | 2            | 30000         | thrpt | 5    | 0.318 | ±0.100 | ops/s |
 
 以下是对测试结果的分析：
 
