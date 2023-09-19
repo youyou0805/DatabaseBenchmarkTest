@@ -149,9 +149,8 @@ public class DatabaseBenchmarkTest {
 - 在相同的测试条件下，使用 `FixedThreadPool` 和 `ForkJoinPool` 的性能表现略有差异。在 `avgt` 模式下，`ForkJoinPool` 的平均执行时间略长，而在 `thrpt` 模式下，两者的吞吐量基本相似。
 - 随着测试规模和线程数增加,错误率error相对提高,但ForkJoinPool的error值普遍低于FixedThreadPool，表明ForkJoinPool处理任务更加稳定,在高并发场景下性能波动小于FixedThreadPool。
 
-​	FixedThreadPool适用于大量短期任务，例如并发请求较多的Web服务器。它具有较低的线程创建和销毁开销，适合于处理大量短期任务。
-
-​	ForkJoinPool适用于递归任务和分治算法，例如大规模数据处理或并行计算。它可以自动将任务分解为较小的子任务，并利用工作窃取算法提高任务并行性。在处理递归任务时，ForkJoinPool通常具有更好的性能。
+FixedThreadPool适用于大量短期任务，例如并发请求较多的Web服务器。它具有较低的线程创建和销毁开销，适合于处理大量短期任务。
+ForkJoinPool适用于递归任务和分治算法，例如大规模数据处理或并行计算。它可以自动将任务分解为较小的子任务，并利用工作窃取算法提高任务并行性。在处理递归任务时，ForkJoinPool通常具有更好的性能。
 
 ## 火焰图
 
