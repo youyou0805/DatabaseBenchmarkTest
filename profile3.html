@@ -1,0 +1,1143 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<style>
+	body {margin: 0; padding: 10px; background-color: #ffffff}
+	h1 {margin: 5px 0 0 0; font-size: 18px; font-weight: normal; text-align: center}
+	header {margin: -24px 0 5px 0; line-height: 24px}
+	button {font: 12px sans-serif; cursor: pointer}
+	p {margin: 5px 0 5px 0}
+	a {color: #0366d6}
+	#hl {position: absolute; display: none; overflow: hidden; white-space: nowrap; pointer-events: none; background-color: #ffffe0; outline: 1px solid #ffc000; height: 15px}
+	#hl span {padding: 0 3px 0 3px}
+	#status {overflow: hidden; white-space: nowrap}
+	#match {overflow: hidden; white-space: nowrap; display: none; float: right; text-align: right}
+	#reset {cursor: pointer}
+	#canvas {width: 100%; height: 848px}
+</style>
+</head>
+<body style='font: 12px Verdana, sans-serif'>
+<h1>CPU profile</h1>
+<header style='text-align: left'><button id='reverse' title='Reverse'>&#x1f53b;</button>&nbsp;&nbsp;<button id='search' title='Search'>&#x1f50d;</button></header>
+<header style='text-align: right'>Produced by <a href='https://github.com/jvm-profiling-tools/async-profiler'>async-profiler</a></header>
+<canvas id='canvas'></canvas>
+<div id='hl'><span></span></div>
+<p id='match'>Matched: <span id='matchval'></span> <span id='reset' title='Clear'>&#x274c;</span></p>
+<p id='status'>&nbsp;</p>
+<script>
+	// Copyright 2020 Andrei Pangin
+	// Licensed under the Apache License, Version 2.0.
+	'use strict';
+	var root, rootLevel, px, pattern;
+	var reverse = false;
+	const levels = Array(53);
+	for (let h = 0; h < levels.length; h++) {
+		levels[h] = [];
+	}
+
+	const canvas = document.getElementById('canvas');
+	const c = canvas.getContext('2d');
+	const hl = document.getElementById('hl');
+	const status = document.getElementById('status');
+
+	const canvasWidth = canvas.offsetWidth;
+	const canvasHeight = canvas.offsetHeight;
+	canvas.style.width = canvasWidth + 'px';
+	canvas.width = canvasWidth * (devicePixelRatio || 1);
+	canvas.height = canvasHeight * (devicePixelRatio || 1);
+	if (devicePixelRatio) c.scale(devicePixelRatio, devicePixelRatio);
+	c.font = document.body.style.font;
+
+	const palette = [
+		[0xb2e1b2, 20, 20, 20],
+		[0x50e150, 30, 30, 30],
+		[0x50cccc, 30, 30, 30],
+		[0xe15a5a, 30, 40, 40],
+		[0xc8c83c, 30, 30, 10],
+		[0xe17d00, 30, 30,  0],
+		[0xcce880, 20, 20, 20],
+	];
+
+	function getColor(p) {
+		const v = Math.random();
+		return '#' + (p[0] + ((p[1] * v) << 16 | (p[2] * v) << 8 | (p[3] * v))).toString(16);
+	}
+
+	function f(level, left, width, type, title, inln, c1, int) {
+		levels[level].push({left: left, width: width, color: getColor(palette[type]), title: title,
+			details: (int ? ', int=' + int : '') + (c1 ? ', c1=' + c1 : '') + (inln ? ', inln=' + inln : '')
+		});
+	}
+
+	function samples(n) {
+		return n === 1 ? '1 sample' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' samples';
+	}
+
+	function pct(a, b) {
+		return a >= b ? '100' : (100 * a / b).toFixed(2);
+	}
+
+	function findFrame(frames, x) {
+		let left = 0;
+		let right = frames.length - 1;
+
+		while (left <= right) {
+			const mid = (left + right) >>> 1;
+			const f = frames[mid];
+
+			if (f.left > x) {
+				right = mid - 1;
+			} else if (f.left + f.width <= x) {
+				left = mid + 1;
+			} else {
+				return f;
+			}
+		}
+
+		if (frames[left] && (frames[left].left - x) * px < 0.5) return frames[left];
+		if (frames[right] && (x - (frames[right].left + frames[right].width)) * px < 0.5) return frames[right];
+
+		return null;
+	}
+
+	function search(r) {
+		if (r === true && (r = prompt('Enter regexp to search:', '')) === null) {
+			return;
+		}
+
+		pattern = r ? RegExp(r) : undefined;
+		const matched = render(root, rootLevel);
+		document.getElementById('matchval').textContent = pct(matched, root.width) + '%';
+		document.getElementById('match').style.display = r ? 'inherit' : 'none';
+	}
+
+	function render(newRoot, newLevel) {
+		if (root) {
+			c.fillStyle = '#ffffff';
+			c.fillRect(0, 0, canvasWidth, canvasHeight);
+		}
+
+		root = newRoot || levels[0][0];
+		rootLevel = newLevel || 0;
+		px = canvasWidth / root.width;
+
+		const x0 = root.left;
+		const x1 = x0 + root.width;
+		const marked = [];
+
+		function mark(f) {
+			return marked[f.left] >= f.width || (marked[f.left] = f.width);
+		}
+
+		function totalMarked() {
+			let total = 0;
+			let left = 0;
+			Object.keys(marked).sort(function(a, b) { return a - b; }).forEach(function(x) {
+				if (+x >= left) {
+					total += marked[x];
+					left = +x + marked[x];
+				}
+			});
+			return total;
+		}
+
+		function drawFrame(f, y, alpha) {
+			if (f.left < x1 && f.left + f.width > x0) {
+				c.fillStyle = pattern && f.title.match(pattern) && mark(f) ? '#ee00ee' : f.color;
+				c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+
+				if (f.width * px >= 21) {
+					const chars = Math.floor(f.width * px / 7);
+					const title = f.title.length <= chars ? f.title : f.title.substring(0, chars - 2) + '..';
+					c.fillStyle = '#000000';
+					c.fillText(title, Math.max(f.left - x0, 0) * px + 3, y + 12, f.width * px - 6);
+				}
+
+				if (alpha) {
+					c.fillStyle = 'rgba(255, 255, 255, 0.5)';
+					c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+				}
+			}
+		}
+
+		for (let h = 0; h < levels.length; h++) {
+			const y = reverse ? h * 16 : canvasHeight - (h + 1) * 16;
+			const frames = levels[h];
+			for (let i = 0; i < frames.length; i++) {
+				drawFrame(frames[i], y, h < rootLevel);
+			}
+		}
+
+		return totalMarked();
+	}
+
+	canvas.onmousemove = function() {
+		const h = Math.floor((reverse ? event.offsetY : (canvasHeight - event.offsetY)) / 16);
+		if (h >= 0 && h < levels.length) {
+			const f = findFrame(levels[h], event.offsetX / px + root.left);
+			if (f) {
+				if (f != root) getSelection().removeAllRanges();
+				hl.style.left = (Math.max(f.left - root.left, 0) * px + canvas.offsetLeft) + 'px';
+				hl.style.width = (Math.min(f.width, root.width) * px) + 'px';
+				hl.style.top = ((reverse ? h * 16 : canvasHeight - (h + 1) * 16) + canvas.offsetTop) + 'px';
+				hl.firstChild.textContent = f.title;
+				hl.style.display = 'block';
+				canvas.title = f.title + '\n(' + samples(f.width) + f.details + ', ' + pct(f.width, levels[0][0].width) + '%)';
+				canvas.style.cursor = 'pointer';
+				canvas.onclick = function() {
+					if (f != root) {
+						render(f, h);
+						canvas.onmousemove();
+					}
+				};
+				status.textContent = 'Function: ' + canvas.title;
+				return;
+			}
+		}
+		canvas.onmouseout();
+	}
+
+	canvas.onmouseout = function() {
+		hl.style.display = 'none';
+		status.textContent = '\xa0';
+		canvas.title = '';
+		canvas.style.cursor = '';
+		canvas.onclick = '';
+	}
+
+	canvas.ondblclick = function() {
+		getSelection().selectAllChildren(hl);
+	}
+
+	document.getElementById('reverse').onclick = function() {
+		reverse = !reverse;
+		render();
+	}
+
+	document.getElementById('search').onclick = function() {
+		search(true);
+	}
+
+	document.getElementById('reset').onclick = function() {
+		search(false);
+	}
+
+	window.onkeydown = function() {
+		if (event.ctrlKey && event.keyCode === 70) {
+			event.preventDefault();
+			search(true);
+		} else if (event.keyCode === 27) {
+			search(false);
+		}
+	}
+
+f(0,0,88,3,'all')
+f(1,0,1,3,'[unknown_Java]')
+f(2,0,1,3,'[unknown]')
+f(3,0,1,3,'__clock_gettime')
+f(4,0,1,3,'clock_gettime')
+f(5,0,1,3,'[vdso]')
+f(1,1,1,1,'java/lang/Thread.exit')
+f(2,1,1,1,'jdk/internal/misc/TerminatingThreadLocal.threadTerminated')
+f(3,1,1,1,'java/lang/ThreadLocal.get')
+f(4,1,1,1,'java/lang/ThreadLocal.get')
+f(5,1,1,4,'SharedRuntime::handle_wrong_method_ic_miss(JavaThread*)')
+f(6,1,1,4,'SharedRuntime::handle_ic_miss_helper(JavaThread*, Thread*)')
+f(7,1,1,4,'CompiledIC::set_to_megamorphic(CallInfo*, Bytecodes::Code, Thread*)')
+f(8,1,1,4,'InlineCacheBuffer::create_transition_stub(CompiledIC*, void*, unsigned char*)')
+f(9,1,1,4,'CompiledIC::internal_set_ic_destination(unsigned char*, bool, void*, bool)')
+f(1,2,1,1,'java/lang/invoke/LambdaForm$DMH/1607460018.invokeStatic_L4_L')
+f(2,2,1,1,'java/lang/invoke/BoundMethodHandle$Species_LL.make')
+f(3,2,1,1,'java/lang/invoke/BoundMethodHandle$Species_LL.<init>')
+f(4,2,1,1,'java/lang/invoke/BoundMethodHandle.<init>')
+f(5,2,1,1,'java/lang/invoke/MethodHandle.<init>')
+f(6,2,1,1,'java/lang/invoke/LambdaForm.prepare')
+f(7,2,1,1,'java/lang/invoke/LambdaForm.compileToBytecode')
+f(8,2,1,1,'java/lang/invoke/InvokerBytecodeGenerator.generateCustomizedCode')
+f(9,2,1,1,'java/lang/invoke/InvokerBytecodeGenerator.loadMethod')
+f(10,2,1,1,'java/lang/invoke/InvokerBytecodeGenerator.loadAndInitializeInvokerClass')
+f(11,2,1,0,'sun/misc/Unsafe.defineAnonymousClass',0,0,1)
+f(12,2,1,3,'Unsafe_DefineAnonymousClass')
+f(13,2,1,4,'SystemDictionary::parse_stream(Symbol*, Handle, Handle, ClassFileStream*, KlassHandle, GrowableArray<Handle>*, Thread*)')
+f(14,2,1,4,'ClassFileParser::parseClassFile(Symbol*, ClassLoaderData*, Handle, KlassHandle, GrowableArray<Handle>*, TempNewSymbol&, bool, Thread*)')
+f(15,2,1,4,'ClassFileParser::parse_constant_pool(Thread*)')
+f(16,2,1,4,'ClassFileParser::parse_constant_pool_entries(int, Thread*)')
+f(17,2,1,4,'SymbolTable::lookup_only(char const*, int, unsigned int&)')
+f(1,3,18,1,'org/openjdk/jmh/Main.main')
+f(2,3,2,1,'org/openjdk/jmh/runner/Runner.<init>')
+f(3,3,2,1,'org/openjdk/jmh/runner/Runner.createOutputFormat')
+f(4,3,1,1,'org/openjdk/jmh/util/Utils.<clinit>')
+f(5,3,1,1,'java/lang/reflect/Field.get')
+f(6,3,1,1,'java/lang/reflect/Field.getFieldAccessor')
+f(7,3,1,1,'java/lang/reflect/Field.acquireFieldAccessor')
+f(8,3,1,1,'sun/reflect/ReflectionFactory.newFieldAccessor')
+f(9,3,1,1,'sun/reflect/UnsafeFieldAccessorFactory.newFieldAccessor')
+f(10,3,1,0,'java/lang/reflect/Field.getType',0,0,1)
+f(4,4,1,1,'org/openjdk/jmh/util/Utils.guessConsoleEncoding')
+f(5,4,1,1,'java/lang/System.console')
+f(6,4,1,1,'java/io/Console$2.console')
+f(7,4,1,1,'java/io/Console.<init>')
+f(8,4,1,1,'java/io/Console.<init>')
+f(9,4,1,1,'java/util/Formatter.<init>')
+f(10,4,1,1,'java/util/Formatter.<init>')
+f(11,4,1,1,'java/util/Formatter.getZero')
+f(12,4,1,1,'java/text/DecimalFormatSymbols.getInstance')
+f(13,4,1,1,'sun/util/locale/provider/DecimalFormatSymbolsProviderImpl.getInstance')
+f(14,4,1,1,'java/text/DecimalFormatSymbols.<init>')
+f(15,4,1,1,'java/text/DecimalFormatSymbols.initialize')
+f(16,4,1,1,'java/util/Currency.getSymbol')
+f(17,4,1,1,'sun/util/locale/provider/LocaleServiceProviderPool.getLocalizedObject')
+f(18,4,1,1,'sun/util/locale/provider/LocaleServiceProviderPool.getLocalizedObjectImpl')
+f(19,4,1,1,'java/util/Currency$CurrencyNameGetter.getObject')
+f(20,4,1,1,'java/util/Currency$CurrencyNameGetter.getObject')
+f(21,4,1,1,'sun/util/locale/provider/CurrencyNameProviderImpl.getSymbol')
+f(22,4,1,1,'sun/util/locale/provider/CurrencyNameProviderImpl.getString')
+f(23,4,1,1,'sun/util/locale/provider/LocaleResources.getCurrencyName')
+f(24,4,1,1,'java/util/ResourceBundle.containsKey')
+f(25,4,1,1,'sun/util/resources/OpenListResourceBundle.handleKeySet')
+f(26,4,1,1,'sun/util/resources/OpenListResourceBundle.loadLookupTablesIfNecessary')
+f(27,4,1,1,'sun/util/resources/OpenListResourceBundle.loadLookup')
+f(28,4,1,0,'sun/util/resources/zh/CurrencyNames_zh_CN.getContents',0,0,1)
+f(29,4,1,4,'InterpreterRuntime::resolve_ldc(JavaThread*, Bytecodes::Code)')
+f(30,4,1,4,'Bytecode_loadconstant::resolve_constant(Thread*) const')
+f(31,4,1,4,'ConstantPool::resolve_constant_at_impl(constantPoolHandle, int, int, Thread*)')
+f(32,4,1,4,'ConstantPool::string_at_impl(constantPoolHandle, int, int, Thread*)')
+f(33,4,1,4,'StringTable::intern(Symbol*, Thread*)')
+f(34,4,1,4,'StringTable::intern(Handle, unsigned short*, int, Thread*)')
+f(35,4,1,4,'Monitor::IUnlock(bool)')
+f(2,5,13,1,'org/openjdk/jmh/runner/Runner.run')
+f(3,5,13,1,'org/openjdk/jmh/runner/Runner.internalRun')
+f(4,5,13,1,'org/openjdk/jmh/runner/Runner.runBenchmarks')
+f(5,5,1,1,'org/openjdk/jmh/runner/Runner.getActionPlans')
+f(6,5,1,1,'org/openjdk/jmh/runner/Runner.newBenchmarkParams')
+f(7,5,1,1,'org/openjdk/jmh/infra/BenchmarkParams.<clinit>')
+f(8,5,1,1,'org/openjdk/jmh/util/Utils.check')
+f(9,5,1,1,'org/openjdk/jmh/util/Utils.check')
+f(10,5,1,1,'org/openjdk/jmh/util/Utils.getOffset')
+f(11,5,1,1,'java/lang/Class.getDeclaredField')
+f(12,5,1,1,'java/lang/Class.searchFields')
+f(13,5,1,1,'java/lang/String.intern')
+f(5,6,11,1,'org/openjdk/jmh/runner/Runner.runSeparate')
+f(6,6,1,1,'org/openjdk/jmh/profile/ProfilerFactory.<clinit>')
+f(7,6,1,1,'java/lang/ClassLoader.loadClass')
+f(8,6,1,1,'sun/misc/Launcher$AppClassLoader.loadClass')
+f(9,6,1,1,'java/lang/ClassLoader.loadClass')
+f(10,6,1,1,'java/net/URLClassLoader.findClass')
+f(11,6,1,1,'java/security/AccessController.doPrivileged')
+f(12,6,1,1,'java/net/URLClassLoader$1.run')
+f(13,6,1,1,'java/net/URLClassLoader$1.run')
+f(14,6,1,1,'java/net/URLClassLoader.access$100')
+f(15,6,1,1,'java/net/URLClassLoader.defineClass')
+f(16,6,1,1,'sun/misc/Resource.getByteBuffer')
+f(17,6,1,1,'sun/misc/Resource.cachedInputStream')
+f(18,6,1,1,'sun/misc/URLClassPath$JarLoader$2.getInputStream')
+f(19,6,1,1,'java/util/jar/JarFile.getInputStream')
+f(20,6,1,1,'java/util/zip/ZipFile.getInputStream')
+f(21,6,1,0,'java/util/zip/ZipFile.getEntry',0,0,1)
+f(22,6,1,4,'InterpreterRuntime::frequency_counter_overflow(JavaThread*, unsigned char*)')
+f(23,6,1,4,'InterpreterRuntime::frequency_counter_overflow_inner(JavaThread*, unsigned char*)')
+f(24,6,1,4,'SimpleThresholdPolicy::event(methodHandle, methodHandle, int, int, CompLevel, nmethod*, JavaThread*)')
+f(25,6,1,4,'AdvancedThresholdPolicy::method_invocation_event(methodHandle, methodHandle, CompLevel, nmethod*, JavaThread*)')
+f(26,6,1,4,'SimpleThresholdPolicy::compile(methodHandle, int, CompLevel, JavaThread*)')
+f(27,6,1,4,'AdvancedThresholdPolicy::submit_compile(methodHandle, int, CompLevel, JavaThread*)')
+f(28,6,1,4,'CompileBroker::compile_method(methodHandle, int, int, methodHandle, int, char const*, Thread*)')
+f(29,6,1,4,'AdapterHandlerLibrary::create_native_wrapper(methodHandle)')
+f(30,6,1,4,'SharedRuntime::generate_native_wrapper(MacroAssembler*, methodHandle, int, BasicType*, VMRegPair*, BasicType)')
+f(31,6,1,4,'Method::critical_native_function()')
+f(32,6,1,4,'NativeLookup::lookup_critical_entry(methodHandle)')
+f(33,6,1,4,'NativeLookup::lookup_critical_style(methodHandle, char*, char const*, int, bool)')
+f(34,6,1,4,'os::dll_load(char const*, char*, int)')
+f(35,6,1,4,'Profiler::dlopen_hook(char const*, int)')
+f(36,6,1,3,'__strchr_avx2')
+f(6,7,1,1,'org/openjdk/jmh/results/RunResult.<clinit>')
+f(7,7,1,1,'java/lang/invoke/MethodHandleNatives.linkCallSite')
+f(8,7,1,1,'java/lang/invoke/MethodHandleNatives.linkCallSiteImpl')
+f(9,7,1,1,'java/lang/invoke/CallSite.makeSite')
+f(10,7,1,1,'java/lang/invoke/LambdaForm$MH/932583850.invoke_MT')
+f(11,7,1,1,'java/lang/invoke/LambdaForm$BMH/976727656.reinvoke')
+f(12,7,1,1,'java/lang/invoke/LambdaForm$DMH/1031980531.invokeStatic_L6_L')
+f(13,7,1,1,'java/lang/invoke/LambdaMetafactory.metafactory')
+f(14,7,1,1,'java/lang/invoke/InnerClassLambdaMetafactory.buildCallSite')
+f(15,7,1,1,'java/lang/invoke/InnerClassLambdaMetafactory.spinInnerClass')
+f(16,7,1,0,'jdk/internal/org/objectweb/asm/ClassWriter.visit',0,0,1)
+f(6,8,3,1,'org/openjdk/jmh/runner/Runner.getForkedMainCommand')
+f(7,8,3,1,'org/openjdk/jmh/runner/CompilerHints.addCompilerHints')
+f(8,8,3,1,'org/openjdk/jmh/runner/CompilerHints.hintsFile')
+f(9,8,3,1,'org/openjdk/jmh/util/FileUtils.createTempFileWithLines')
+f(10,8,3,1,'org/openjdk/jmh/util/FileUtils.tempFile')
+f(11,8,3,1,'java/io/File.createTempFile')
+f(12,8,3,1,'java/io/File.createTempFile')
+f(13,8,3,1,'java/io/File$TempDirectory.<clinit>')
+f(14,8,3,1,'java/security/SecureRandom.<init>')
+f(15,8,3,1,'java/security/SecureRandom.getDefaultPRNG')
+f(16,8,3,1,'java/security/SecureRandom.getPrngAlgorithm')
+f(17,8,1,1,'java/security/Provider.getServices')
+f(18,8,1,1,'java/security/Provider.ensureLegacyParsed')
+f(19,8,1,1,'java/security/Provider.parseLegacyPut')
+f(20,8,1,1,'java/security/Provider$Service.access$500')
+f(21,8,1,0,'java/security/Provider$Service.addAlias',0,0,1)
+f(22,8,1,4,'InterpreterRuntime::resolve_invoke(JavaThread*, Bytecodes::Code)')
+f(23,8,1,4,'InterpreterRuntime::cache_entry(JavaThread*)')
+f(24,8,1,4,'CodeBlob::is_nmethod() const')
+f(17,9,2,0,'sun/security/jca/Providers.<clinit>',0,0,1)
+f(18,9,1,4,'InterpreterRuntime::_new(JavaThread*, ConstantPool*, int)')
+f(19,9,1,4,'InstanceKlass::initialize(Thread*)')
+f(20,9,1,4,'InstanceKlass::initialize_impl(instanceKlassHandle, Thread*)')
+f(21,9,1,4,'InstanceKlass::link_class_impl(instanceKlassHandle, bool, Thread*)')
+f(22,9,1,4,'JvmtiExport::post_class_prepare(JavaThread*, Klass*)')
+f(23,9,1,4,'VM::loadMethodIDs(_jvmtiEnv*, JNIEnv_*, _jclass*)')
+f(24,9,1,3,'jvmti_GetClassMethods')
+f(25,9,1,4,'JvmtiEnv::GetClassMethods(oopDesc*, int*, _jmethodID***)')
+f(26,9,1,4,'Method::jmethod_id()')
+f(27,9,1,4,'InstanceKlass::get_jmethod_id(instanceKlassHandle, methodHandle)')
+f(18,10,1,1,'sun/security/jca/ProviderList.fromSecurityProperties')
+f(19,10,1,1,'java/security/AccessController.doPrivileged')
+f(20,10,1,1,'sun/security/jca/ProviderList$2.run')
+f(21,10,1,1,'sun/security/jca/ProviderList$2.run')
+f(22,10,1,1,'sun/security/jca/ProviderList.<init>')
+f(23,10,1,1,'sun/security/jca/ProviderList.<init>')
+f(24,10,1,1,'java/security/Security.<clinit>')
+f(25,10,1,1,'java/security/AccessController.doPrivileged')
+f(26,10,1,1,'java/security/Security$1.run')
+f(27,10,1,1,'java/security/Security$1.run')
+f(28,10,1,1,'java/security/Security.access$000')
+f(29,10,1,1,'java/security/Security.initialize')
+f(30,10,1,1,'java/util/Properties.load')
+f(31,10,1,1,'java/util/Properties.load0')
+f(32,10,1,1,'java/util/Properties$LineReader.readLine')
+f(33,10,1,1,'java/io/FilterInputStream.read')
+f(34,10,1,1,'java/io/BufferedInputStream.read')
+f(35,10,1,1,'java/io/BufferedInputStream.read1')
+f(36,10,1,1,'java/io/FileInputStream.read')
+f(37,10,1,0,'java/io/FileInputStream.readBytes',0,0,1)
+f(6,11,3,1,'org/openjdk/jmh/runner/format/TextReportFormat.endBenchmark')
+f(7,11,3,1,'org/openjdk/jmh/results/Result.extendedInfo')
+f(8,11,3,1,'org/openjdk/jmh/results/Result.simpleExtendedInfo')
+f(9,11,3,1,'org/openjdk/jmh/results/Result.getScoreConfidence')
+f(10,11,3,1,'org/openjdk/jmh/util/AbstractStatistics.getConfidenceIntervalAt')
+f(11,11,1,1,'java/lang/ClassLoader.loadClass')
+f(12,11,1,1,'sun/misc/Launcher$AppClassLoader.loadClass')
+f(13,11,1,1,'java/lang/ClassLoader.loadClass')
+f(14,11,1,1,'java/net/URLClassLoader.findClass')
+f(15,11,1,1,'java/security/AccessController.doPrivileged')
+f(16,11,1,1,'java/net/URLClassLoader$1.run')
+f(17,11,1,1,'java/net/URLClassLoader$1.run')
+f(18,11,1,1,'java/net/URLClassLoader.access$100')
+f(19,11,1,1,'java/net/URLClassLoader.defineClass')
+f(20,11,1,1,'java/security/SecureClassLoader.defineClass')
+f(21,11,1,1,'java/lang/ClassLoader.defineClass')
+f(22,11,1,1,'java/lang/ClassLoader.preDefineClass')
+f(23,11,1,0,'java/lang/ClassLoader.checkCerts',0,0,1)
+f(11,12,2,0,'org/apache/commons/math3/distribution/AbstractRealDistribution.inverseCumulativeProbability',0,0,1)
+f(12,12,1,4,'InterpreterRuntime::resolve_invoke(JavaThread*, Bytecodes::Code)')
+f(13,12,1,4,'LinkResolver::resolve_invoke(CallInfo&, Handle, constantPoolHandle, int, Bytecodes::Code, Thread*)')
+f(14,12,1,4,'LinkResolver::resolve_invokestatic(CallInfo&, constantPoolHandle, int, Thread*)')
+f(15,12,1,4,'LinkResolver::resolve_static_call(CallInfo&, KlassHandle&, Symbol*, Symbol*, KlassHandle, bool, bool, Thread*)')
+f(16,12,1,4,'InstanceKlass::initialize(Thread*)')
+f(17,12,1,4,'InstanceKlass::initialize_impl(instanceKlassHandle, Thread*)')
+f(18,12,1,4,'InstanceKlass::link_class_impl(instanceKlassHandle, bool, Thread*)')
+f(19,12,1,4,'Verifier::verify(instanceKlassHandle, Verifier::Mode, bool, Thread*)')
+f(20,12,1,4,'Verifier::inference_verify(instanceKlassHandle, char*, unsigned long, Thread*)')
+f(21,12,1,3,'VerifyClassForMajorVersion')
+f(22,12,1,3,'verify_method')
+f(23,12,1,3,'run_dataflow')
+f(24,12,1,3,'__strlen_avx2')
+f(12,13,1,1,'org/apache/commons/math3/analysis/solvers/UnivariateSolverUtils.solve')
+f(13,13,1,1,'org/apache/commons/math3/analysis/solvers/BaseAbstractUnivariateSolver.solve')
+f(14,13,1,1,'org/apache/commons/math3/analysis/solvers/BaseAbstractUnivariateSolver.solve')
+f(15,13,1,1,'org/apache/commons/math3/analysis/solvers/BrentSolver.doSolve')
+f(16,13,1,1,'org/apache/commons/math3/analysis/solvers/BaseAbstractUnivariateSolver.computeObjectiveValue')
+f(17,13,1,1,'org/apache/commons/math3/distribution/AbstractRealDistribution$1.value')
+f(18,13,1,1,'org/apache/commons/math3/distribution/TDistribution.cumulativeProbability')
+f(19,13,1,1,'org/apache/commons/math3/special/Beta.regularizedBeta')
+f(20,13,1,1,'org/apache/commons/math3/special/Beta.regularizedBeta')
+f(21,13,1,1,'org/apache/commons/math3/util/FastMath.log')
+f(22,13,1,1,'org/apache/commons/math3/util/FastMath.log')
+f(23,13,1,0,'org/apache/commons/math3/util/FastMath$lnMant.<clinit>',0,0,1)
+f(24,13,1,4,'InterpreterRuntime::resolve_invoke(JavaThread*, Bytecodes::Code)')
+f(25,13,1,4,'LinkResolver::resolve_invoke(CallInfo&, Handle, constantPoolHandle, int, Bytecodes::Code, Thread*)')
+f(26,13,1,4,'LinkResolver::resolve_invokestatic(CallInfo&, constantPoolHandle, int, Thread*)')
+f(27,13,1,4,'LinkResolver::resolve_static_call(CallInfo&, KlassHandle&, Symbol*, Symbol*, KlassHandle, bool, bool, Thread*)')
+f(28,13,1,4,'InstanceKlass::initialize(Thread*)')
+f(29,13,1,4,'InstanceKlass::initialize_impl(instanceKlassHandle, Thread*)')
+f(30,13,1,4,'InstanceKlass::link_class_impl(instanceKlassHandle, bool, Thread*)')
+f(31,13,1,4,'Verifier::verify(instanceKlassHandle, Verifier::Mode, bool, Thread*)')
+f(32,13,1,4,'Verifier::inference_verify(instanceKlassHandle, char*, unsigned long, Thread*)')
+f(33,13,1,3,'VerifyClassForMajorVersion')
+f(34,13,1,3,'verify_method')
+f(6,14,3,1,'org/openjdk/jmh/runner/format/TextReportFormat.startBenchmark')
+f(7,14,3,1,'org/openjdk/jmh/runner/CompilerHints.printBlackhole')
+f(8,14,3,1,'org/openjdk/jmh/runner/CompilerHints.blackholeMode')
+f(9,14,3,1,'org/openjdk/jmh/runner/CompilerHints.compilerBlackholesAvailable')
+f(10,14,3,1,'org/openjdk/jmh/util/Utils.runWith')
+f(11,14,3,1,'java/lang/ProcessBuilder.start')
+f(12,14,3,1,'java/lang/ProcessImpl.start')
+f(13,14,3,1,'java/lang/UNIXProcess.<clinit>')
+f(14,14,3,1,'java/lang/UNIXProcess$Platform.get')
+f(15,14,3,1,'java/lang/invoke/MethodHandleNatives.linkCallSite')
+f(16,14,3,1,'java/lang/invoke/MethodHandleNatives.linkCallSiteImpl')
+f(17,14,2,1,'java/lang/invoke/CallSite.<clinit>')
+f(18,14,2,1,'java/lang/invoke/MethodHandles$Lookup.findStatic')
+f(19,14,2,1,'java/lang/invoke/MethodHandles$Lookup.getDirectMethod')
+f(20,14,2,1,'java/lang/invoke/MethodHandles$Lookup.getDirectMethodCommon')
+f(21,14,2,1,'java/lang/invoke/MethodHandle.setVarargs')
+f(22,14,2,1,'java/lang/invoke/MethodHandleImpl.makeVarargsCollector')
+f(23,14,2,1,'java/lang/invoke/MethodHandleImpl$AsVarargsCollector.<init>')
+f(24,14,2,1,'java/lang/invoke/MethodHandleImpl$AsVarargsCollector.<init>')
+f(25,14,2,1,'java/lang/invoke/MethodHandle.asCollector')
+f(26,14,2,1,'java/lang/invoke/MethodHandleImpl.varargsArray')
+f(27,14,2,1,'java/lang/invoke/MethodHandleImpl.varargsArray')
+f(28,14,2,1,'java/lang/invoke/MethodHandleImpl$Lazy.<clinit>')
+f(29,14,1,1,'java/lang/invoke/LambdaForm$NamedFunction.resolve')
+f(30,14,1,1,'java/lang/invoke/DirectMethodHandle.make')
+f(31,14,1,1,'java/lang/invoke/DirectMethodHandle.make')
+f(32,14,1,1,'java/lang/invoke/DirectMethodHandle.make')
+f(33,14,1,1,'java/lang/invoke/MemberName.getMethodOrFieldType')
+f(34,14,1,1,'java/lang/invoke/MemberName.getMethodType')
+f(35,14,1,1,'java/lang/invoke/MethodType.methodType')
+f(36,14,1,1,'java/lang/invoke/MethodType.makeImpl')
+f(37,14,1,1,'java/lang/invoke/MethodTypeForm.findForm')
+f(38,14,1,1,'java/lang/invoke/MethodTypeForm.canonicalize')
+f(39,14,1,1,'java/lang/invoke/MethodType.makeImpl')
+f(40,14,1,1,'java/lang/invoke/MethodType$ConcurrentWeakInternSet.get')
+f(41,14,1,1,'java/util/concurrent/ConcurrentHashMap.get')
+f(42,14,1,4,'SharedRuntime::handle_wrong_method_ic_miss(JavaThread*)')
+f(43,14,1,4,'SharedRuntime::handle_ic_miss_helper(JavaThread*, Thread*)')
+f(44,14,1,4,'SharedRuntime::find_callee_info_helper(JavaThread*, vframeStream&, Bytecodes::Code&, CallInfo&, Thread*)')
+f(45,14,1,4,'Bytecode_invoke::static_target(Thread*)')
+f(46,14,1,4,'LinkResolver::resolve_method_statically(methodHandle&, KlassHandle&, Bytecodes::Code, constantPoolHandle, int, Thread*)')
+f(47,14,1,4,'LinkResolver::resolve_method(methodHandle&, KlassHandle, Symbol*, Symbol*, KlassHandle, bool, bool, Thread*)')
+f(48,14,1,4,'LinkResolver::lookup_method_in_klasses(methodHandle&, KlassHandle, Symbol*, Symbol*, bool, bool, Thread*)')
+f(29,15,1,1,'java/lang/invoke/MethodHandleImpl.access$000')
+f(30,15,1,1,'java/lang/invoke/MethodHandleImpl.makeArrays')
+f(31,15,1,1,'java/lang/invoke/MethodHandleImpl.makeIntrinsic')
+f(32,15,1,1,'java/lang/invoke/MethodHandleImpl$IntrinsicMethodHandle.<init>')
+f(33,15,1,1,'java/lang/invoke/DelegatingMethodHandle.<init>')
+f(34,15,1,1,'java/lang/invoke/MethodHandle.<init>')
+f(35,15,1,1,'java/lang/invoke/LambdaForm.prepare')
+f(36,15,1,1,'java/lang/invoke/LambdaForm.compileToBytecode')
+f(37,15,1,1,'java/lang/invoke/InvokerBytecodeGenerator.generateCustomizedCode')
+f(38,15,1,1,'java/lang/invoke/InvokerBytecodeGenerator.generateCustomizedCodeBytes')
+f(39,15,1,1,'java/lang/invoke/InvokerBytecodeGenerator.classFileEpilogue')
+f(40,15,1,1,'jdk/internal/org/objectweb/asm/MethodWriter.visitMaxs')
+f(41,15,1,1,'jdk/internal/org/objectweb/asm/Frame.initInputFrame')
+f(42,15,1,1,'jdk/internal/org/objectweb/asm/Type.getDescriptor')
+f(43,15,1,0,'java/lang/StringBuffer.<init>',0,0,1)
+f(17,16,1,1,'java/lang/invoke/CallSite.makeSite')
+f(18,16,1,1,'java/lang/invoke/LambdaForm$MH/932583850.invoke_MT')
+f(19,16,1,1,'java/lang/invoke/LambdaForm$BMH/1993134103.reinvoke')
+f(20,16,1,1,'java/lang/invoke/LambdaForm$DMH/1031980531.invokeStatic_L6_L')
+f(21,16,1,1,'java/lang/invoke/LambdaMetafactory.metafactory')
+f(22,16,1,1,'java/lang/invoke/InnerClassLambdaMetafactory.buildCallSite')
+f(23,16,1,1,'java/lang/invoke/InnerClassLambdaMetafactory.spinInnerClass')
+f(24,16,1,0,'java/lang/invoke/TypeConvertingMethodAdapter.<clinit>',0,0,1)
+f(25,16,1,4,'InterpreterRuntime::resolve_get_put(JavaThread*, Bytecodes::Code)')
+f(26,16,1,4,'LinkResolver::resolve_field_access(fieldDescriptor&, constantPoolHandle, int, Bytecodes::Code, Thread*)')
+f(27,16,1,4,'ConstantPool::impl_name_ref_at(int, bool)')
+f(5,17,1,1,'org/openjdk/jmh/runner/format/TextReportFormat.endRun')
+f(6,17,1,1,'org/openjdk/jmh/results/format/TextResultFormat.writeOut')
+f(7,17,1,1,'java/lang/ClassLoader.loadClass')
+f(8,17,1,1,'sun/misc/Launcher$AppClassLoader.loadClass')
+f(9,17,1,1,'java/lang/ClassLoader.loadClass')
+f(10,17,1,1,'java/net/URLClassLoader.findClass')
+f(11,17,1,1,'java/security/AccessController.doPrivileged')
+f(12,17,1,1,'java/net/URLClassLoader$1.run')
+f(13,17,1,1,'java/net/URLClassLoader$1.run')
+f(14,17,1,1,'sun/misc/URLClassPath.getResource')
+f(15,17,1,1,'sun/misc/URLClassPath$JarLoader.getResource')
+f(16,17,1,1,'sun/misc/URLClassPath$JarLoader.checkResource')
+f(17,17,1,1,'java/net/URL.<init>')
+f(18,17,1,1,'java/net/URL.<init>')
+f(19,17,1,0,'sun/net/www/protocol/jar/Handler.parseURL',0,0,1)
+f(2,18,3,1,'org/openjdk/jmh/runner/options/CommandLineOptions.<init>')
+f(3,18,1,1,'java/lang/ClassLoader.loadClass')
+f(4,18,1,1,'sun/misc/Launcher$AppClassLoader.loadClass')
+f(5,18,1,1,'java/lang/ClassLoader.loadClass')
+f(6,18,1,0,'java/lang/ClassLoader.loadClass',0,0,1)
+f(7,18,1,4,'InterpreterRuntime::exception_handler_for_exception(JavaThread*, oopDesc*)')
+f(8,18,1,4,'Method::fast_exception_handler_bci_for(methodHandle, KlassHandle, int, Thread*)')
+f(3,19,1,1,'joptsimple/ArgumentAcceptingOptionSpec.ofType')
+f(4,19,1,1,'joptsimple/internal/Reflection.findConverter')
+f(5,19,1,1,'joptsimple/internal/Reflection.constructorConverter')
+f(6,19,1,1,'java/lang/ClassLoader.loadClass')
+f(7,19,1,1,'sun/misc/Launcher$AppClassLoader.loadClass')
+f(8,19,1,1,'java/lang/ClassLoader.loadClass')
+f(9,19,1,1,'java/net/URLClassLoader.findClass')
+f(10,19,1,1,'java/security/AccessController.doPrivileged')
+f(11,19,1,1,'java/net/URLClassLoader$1.run')
+f(12,19,1,1,'java/net/URLClassLoader$1.run')
+f(13,19,1,1,'java/net/URLClassLoader.access$100')
+f(14,19,1,1,'java/net/URLClassLoader.defineClass')
+f(15,19,1,1,'java/net/URLClassLoader.definePackageInternal')
+f(16,19,1,1,'java/net/URLClassLoader.getAndVerifyPackage')
+f(17,19,1,1,'java/lang/ClassLoader.getPackage')
+f(18,19,1,1,'java/util/HashMap.get')
+f(19,19,1,1,'java/util/HashMap.getNode')
+f(20,19,1,4,'SharedRuntime::resolve_virtual_call_C(JavaThread*)')
+f(21,19,1,4,'SharedRuntime::resolve_helper(JavaThread*, bool, bool, Thread*)')
+f(22,19,1,4,'SharedRuntime::resolve_sub_helper(JavaThread*, bool, bool, Thread*)')
+f(23,19,1,4,'SharedRuntime::find_callee_info_helper(JavaThread*, vframeStream&, Bytecodes::Code&, CallInfo&, Thread*)')
+f(24,19,1,4,'frame::sender(RegisterMap*) const')
+f(25,19,1,4,'frame::sender_for_compiled_frame(RegisterMap*) const')
+f(26,19,1,4,'OopMapSet::update_register_map(frame const*, RegisterMap*)')
+f(3,20,1,1,'joptsimple/OptionParser.<init>')
+f(4,20,1,1,'joptsimple/OptionParser.<init>')
+f(5,20,1,1,'joptsimple/OptionParserState.moreOptions')
+f(6,20,1,1,'java/lang/ClassLoader.loadClass')
+f(7,20,1,1,'sun/misc/Launcher$AppClassLoader.loadClass')
+f(8,20,1,1,'java/lang/ClassLoader.loadClass')
+f(9,20,1,1,'java/net/URLClassLoader.findClass')
+f(10,20,1,1,'java/security/AccessController.doPrivileged')
+f(11,20,1,1,'java/net/URLClassLoader$1.run')
+f(12,20,1,1,'java/net/URLClassLoader$1.run')
+f(13,20,1,1,'sun/misc/URLClassPath.getResource')
+f(14,20,1,1,'sun/misc/URLClassPath$JarLoader.getResource')
+f(15,20,1,1,'java/util/jar/JarFile.getJarEntry')
+f(16,20,1,1,'java/util/jar/JarFile.getEntry')
+f(17,20,1,1,'java/util/zip/ZipFile.getEntry')
+f(18,20,1,1,'java/util/zip/ZipCoder.getBytes')
+f(19,20,1,0,'java/util/Arrays.copyOf',0,0,1)
+f(1,21,3,1,'org/openjdk/jmh/runner/link/BinaryLinkServer$Acceptor.run')
+f(2,21,2,1,'java/net/ServerSocket.accept')
+f(3,21,2,1,'java/net/ServerSocket.implAccept')
+f(4,21,2,1,'sun/nio/ch/VTSocketImpl.accept')
+f(5,21,2,1,'sun/nio/ch/VTSocketImpl.accept0')
+f(6,21,2,1,'sun/nio/ch/VTSocketImpl.park')
+f(7,21,2,1,'sun/nio/ch/VTSocketImpl.registerEvent')
+f(8,21,2,1,'sun/nio/ch/Poller.<clinit>')
+f(9,21,2,1,'sun/nio/ch/Poller.createReadPollers')
+f(10,21,2,1,'sun/nio/ch/Poller.startPollerThread')
+f(11,21,2,1,'java/lang/invoke/MethodHandleNatives.linkMethodHandleConstant')
+f(12,21,2,1,'java/lang/invoke/MethodHandles$Lookup.linkMethodHandleConstant')
+f(13,21,2,1,'java/lang/invoke/MethodHandles$Lookup.getDirectMethodForConstant')
+f(14,21,2,1,'java/lang/invoke/MethodHandles$Lookup.getDirectMethodNoSecurityManager')
+f(15,21,2,1,'java/lang/invoke/MethodHandles$Lookup.getDirectMethodCommon')
+f(16,21,2,1,'java/lang/invoke/DirectMethodHandle.make')
+f(17,21,2,1,'java/lang/invoke/DirectMethodHandle.preparedLambdaForm')
+f(18,21,2,1,'java/lang/invoke/DirectMethodHandle.preparedLambdaForm')
+f(19,21,2,1,'java/lang/invoke/DirectMethodHandle.makePreparedLambdaForm')
+f(20,21,2,1,'java/lang/invoke/LambdaForm.<clinit>')
+f(21,21,2,1,'java/lang/invoke/LambdaForm.createIdentityForms')
+f(22,21,1,1,'java/lang/invoke/BoundMethodHandle.<clinit>')
+f(23,21,1,1,'java/lang/invoke/BoundMethodHandle$SpeciesData.<clinit>')
+f(24,21,1,1,'java/lang/invoke/BoundMethodHandle$SpeciesData.initForBootstrap')
+f(25,21,1,1,'java/lang/invoke/BoundMethodHandle$Factory.makeCtors')
+f(26,21,1,1,'java/lang/invoke/BoundMethodHandle$Factory.makeCbmhCtor')
+f(27,21,1,1,'java/lang/invoke/MethodHandles$Lookup.findStatic')
+f(28,21,1,1,'java/lang/invoke/MethodHandles$Lookup.getDirectMethod')
+f(29,21,1,1,'java/lang/invoke/MethodHandles$Lookup.getDirectMethodCommon')
+f(30,21,1,1,'java/lang/invoke/DirectMethodHandle.make')
+f(31,21,1,1,'java/lang/invoke/DirectMethodHandle.preparedLambdaForm')
+f(32,21,1,1,'java/lang/invoke/DirectMethodHandle.preparedLambdaForm')
+f(33,21,1,1,'java/lang/invoke/DirectMethodHandle.makePreparedLambdaForm')
+f(34,21,1,1,'java/lang/invoke/DirectMethodHandle$Lazy.<clinit>')
+f(35,21,1,1,'java/lang/invoke/LambdaForm$NamedFunction.resolve')
+f(36,21,1,1,'java/lang/invoke/DirectMethodHandle.make')
+f(37,21,1,1,'java/lang/invoke/DirectMethodHandle.make')
+f(38,21,1,1,'java/lang/invoke/DirectMethodHandle.make')
+f(39,21,1,1,'java/lang/invoke/DirectMethodHandle.preparedLambdaForm')
+f(40,21,1,1,'java/lang/invoke/DirectMethodHandle.preparedLambdaForm')
+f(41,21,1,1,'java/lang/invoke/DirectMethodHandle.makePreparedLambdaForm')
+f(42,21,1,1,'java/lang/invoke/LambdaForm.compileToBytecode')
+f(43,21,1,1,'java/lang/invoke/InvokerBytecodeGenerator.generateCustomizedCode')
+f(44,21,1,1,'java/lang/invoke/InvokerBytecodeGenerator.loadMethod')
+f(45,21,1,1,'java/lang/invoke/InvokerBytecodeGenerator.loadAndInitializeInvokerClass')
+f(46,21,1,0,'sun/misc/Unsafe.defineAnonymousClass',0,0,1)
+f(47,21,1,3,'Unsafe_DefineAnonymousClass')
+f(48,21,1,4,'SystemDictionary::parse_stream(Symbol*, Handle, Handle, ClassFileStream*, KlassHandle, GrowableArray<Handle>*, Thread*)')
+f(49,21,1,4,'InstanceKlass::link_class(Thread*)')
+f(50,21,1,4,'InstanceKlass::link_class_impl(instanceKlassHandle, bool, Thread*)')
+f(51,21,1,4,'klassVtable::initialize_vtable(bool, Thread*)')
+f(52,21,1,4,'klassVtable::fill_in_mirandas(int)')
+f(22,22,1,1,'java/lang/invoke/LambdaForm.<init>')
+f(23,22,1,1,'java/lang/invoke/LambdaForm.<init>')
+f(24,22,1,0,'java/lang/invoke/LambdaForm.normalize',0,0,1)
+f(25,22,1,4,'InterpreterRuntime::resolve_get_put(JavaThread*, Bytecodes::Code)')
+f(26,22,1,4,'JavaThread::last_frame()')
+f(27,22,1,4,'CodeCache::find_blob(void*)')
+f(28,22,1,4,'CodeHeap::find_start(void*) const')
+f(2,23,1,1,'org/openjdk/jmh/runner/link/BinaryLinkServer$Handler.<init>')
+f(3,23,1,0,'java/net/Socket.getInputStream',0,0,1)
+f(4,23,1,4,'InterpreterRuntime::_new(JavaThread*, ConstantPool*, int)')
+f(5,23,1,4,'InstanceKlass::initialize(Thread*)')
+f(6,23,1,4,'InstanceKlass::initialize_impl(instanceKlassHandle, Thread*)')
+f(7,23,1,4,'InstanceKlass::link_class_impl(instanceKlassHandle, bool, Thread*)')
+f(8,23,1,4,'InstanceKlass::link_methods(Thread*)')
+f(9,23,1,4,'Method::link_method(methodHandle, Thread*)')
+f(10,23,1,4,'Method::is_method_handle_intrinsic() const')
+f(1,24,10,1,'org/openjdk/jmh/runner/link/BinaryLinkServer$Handler.run')
+f(2,24,4,1,'java/io/ObjectInputStream.readObject')
+f(3,24,4,1,'java/io/ObjectInputStream.readObject')
+f(4,24,4,1,'java/io/ObjectInputStream.readObject0')
+f(5,24,4,1,'java/io/ObjectInputStream.readOrdinaryObject')
+f(6,24,1,1,'java/io/ObjectInputStream.readClassDesc')
+f(7,24,1,1,'java/io/ObjectInputStream.readNonProxyDesc')
+f(8,24,1,1,'java/io/ObjectStreamClass.initNonProxy')
+f(9,24,1,1,'java/io/ObjectStreamClass.lookup')
+f(10,24,1,1,'java/io/ObjectStreamClass.<init>')
+f(11,24,1,1,'java/security/AccessController.doPrivileged')
+f(12,24,1,1,'java/io/ObjectStreamClass$3.run')
+f(13,24,1,1,'java/io/ObjectStreamClass$3.run')
+f(14,24,1,1,'java/io/ObjectStreamClass.access$1500')
+f(15,24,1,1,'java/io/ObjectStreamClass.getSerializableConstructor')
+f(16,24,1,1,'sun/reflect/ReflectionFactory.newConstructorForSerialization')
+f(17,24,1,1,'sun/reflect/ReflectionFactory.generateConstructor')
+f(18,24,1,1,'sun/reflect/MethodAccessorGenerator.generateSerializationConstructor')
+f(19,24,1,1,'sun/reflect/MethodAccessorGenerator.generate')
+f(20,24,1,1,'sun/reflect/MethodAccessorGenerator.emitInvoke')
+f(21,24,1,1,'sun/reflect/ClassFileAssembler.opc_ifnull')
+f(22,24,1,0,'sun/reflect/Label.add',0,0,1)
+f(23,24,1,4,'InterpreterRuntime::resolve_invoke(JavaThread*, Bytecodes::Code)')
+f(24,24,1,4,'LinkResolver::resolve_invoke(CallInfo&, Handle, constantPoolHandle, int, Bytecodes::Code, Thread*)')
+f(25,24,1,4,'LinkResolver::resolve_invokespecial(CallInfo&, Handle, constantPoolHandle, int, Thread*)')
+f(26,24,1,4,'LinkResolver::resolve_special_call(CallInfo&, Handle, KlassHandle, Symbol*, Symbol*, KlassHandle, bool, Thread*)')
+f(27,24,1,4,'LinkResolver::linktime_resolve_special_method(methodHandle&, KlassHandle, Symbol*, Symbol*, KlassHandle, bool, Thread*)')
+f(28,24,1,4,'LinkResolver::resolve_method(methodHandle&, KlassHandle, Symbol*, Symbol*, KlassHandle, bool, bool, Thread*)')
+f(29,24,1,4,'LinkResolver::check_method_accessability(KlassHandle, KlassHandle, KlassHandle, methodHandle, Thread*)')
+f(30,24,1,4,'Reflection::verify_field_access(Klass*, Klass*, Klass*, AccessFlags, bool, bool)')
+f(31,24,1,4,'InstanceKlass::is_same_class_package(oopDesc*, Symbol*, oopDesc*, Symbol*)')
+f(32,24,1,4,'UTF8::strrchr(signed char const*, int, signed char)')
+f(6,25,3,1,'java/io/ObjectInputStream.readSerialData')
+f(7,25,3,1,'java/io/ObjectInputStream.defaultReadFields')
+f(8,25,3,1,'java/io/ObjectInputStream.readObject0')
+f(9,25,3,1,'java/io/ObjectInputStream.readArray')
+f(10,25,3,1,'java/io/ObjectInputStream.readObject0')
+f(11,25,3,1,'java/io/ObjectInputStream.readOrdinaryObject')
+f(12,25,3,1,'java/io/ObjectInputStream.readSerialData')
+f(13,25,3,1,'java/io/ObjectInputStream.defaultReadFields')
+f(14,25,3,1,'java/io/ObjectInputStream.readObject0')
+f(15,25,3,1,'java/io/ObjectInputStream.readOrdinaryObject')
+f(16,25,1,1,'java/io/ObjectInputStream.readClassDesc')
+f(17,25,1,1,'java/io/ObjectInputStream.readNonProxyDesc')
+f(18,25,1,1,'java/io/ObjectStreamClass.initNonProxy')
+f(19,25,1,1,'java/io/ObjectStreamClass.lookup')
+f(20,25,1,1,'java/io/ObjectStreamClass.<init>')
+f(21,25,1,1,'java/security/AccessController.doPrivileged')
+f(22,25,1,1,'java/io/ObjectStreamClass$3.run')
+f(23,25,1,1,'java/io/ObjectStreamClass$3.run')
+f(24,25,1,1,'java/io/ObjectStreamClass.access$1500')
+f(25,25,1,1,'java/io/ObjectStreamClass.getSerializableConstructor')
+f(26,25,1,1,'sun/reflect/ReflectionFactory.newConstructorForSerialization')
+f(27,25,1,1,'sun/reflect/ReflectionFactory.generateConstructor')
+f(28,25,1,1,'sun/reflect/MethodAccessorGenerator.generateSerializationConstructor')
+f(29,25,1,1,'sun/reflect/MethodAccessorGenerator.generate')
+f(30,25,1,1,'sun/reflect/MethodAccessorGenerator.emitInvoke')
+f(31,25,1,1,'sun/reflect/AccessorGenerator.emitMethod')
+f(32,25,1,1,'sun/reflect/ClassFileAssembler.append')
+f(33,25,1,0,'sun/reflect/ClassFileAssembler.append',0,0,1)
+f(16,26,2,1,'java/io/ObjectInputStream.readSerialData')
+f(17,26,2,1,'java/io/ObjectInputStream.defaultReadFields')
+f(18,26,2,1,'java/io/ObjectInputStream.readObject0')
+f(19,26,2,1,'java/io/ObjectInputStream.readOrdinaryObject')
+f(20,26,1,1,'java/io/ObjectInputStream.readClassDesc')
+f(21,26,1,1,'java/io/ObjectInputStream.readNonProxyDesc')
+f(22,26,1,1,'java/io/ObjectInputStream.readClassDesc')
+f(23,26,1,1,'java/io/ObjectInputStream.readNonProxyDesc')
+f(24,26,1,1,'java/io/ObjectStreamClass.initNonProxy')
+f(25,26,1,1,'java/io/ObjectStreamClass.lookup')
+f(26,26,1,1,'java/io/ObjectStreamClass.<init>')
+f(27,26,1,1,'java/security/AccessController.doPrivileged')
+f(28,26,1,1,'java/io/ObjectStreamClass$3.run')
+f(29,26,1,1,'java/io/ObjectStreamClass$3.run')
+f(30,26,1,1,'java/io/ObjectStreamClass.access$1700')
+f(31,26,1,1,'java/io/ObjectStreamClass.getPrivateMethod')
+f(32,26,1,1,'java/lang/Class.getDeclaredMethod')
+f(33,26,1,1,'java/lang/Class.privateGetDeclaredMethods')
+f(34,26,1,1,'java/lang/Class.getDeclaredMethods0')
+f(35,26,1,1,'java/lang/ClassLoader.loadClass')
+f(36,26,1,1,'sun/misc/Launcher$AppClassLoader.loadClass')
+f(37,26,1,1,'java/lang/ClassLoader.loadClass')
+f(38,26,1,1,'java/net/URLClassLoader.findClass')
+f(39,26,1,1,'java/security/AccessController.doPrivileged')
+f(40,26,1,1,'java/net/URLClassLoader$1.run')
+f(41,26,1,1,'java/net/URLClassLoader$1.run')
+f(42,26,1,1,'java/net/URLClassLoader.access$100')
+f(43,26,1,1,'java/net/URLClassLoader.defineClass')
+f(44,26,1,1,'sun/misc/URLClassPath$JarLoader$2.getBytes')
+f(45,26,1,1,'sun/misc/Resource.getBytes')
+f(46,26,1,1,'java/util/zip/InflaterInputStream.read')
+f(47,26,1,1,'java/util/zip/ZipFile$ZipFileInflaterInputStream.fill')
+f(48,26,1,0,'java/util/zip/ZipFile$ZipFileInputStream.read',0,0,1)
+f(20,27,1,1,'java/io/ObjectInputStream.readSerialData')
+f(21,27,1,1,'java/io/ObjectInputStream.defaultReadFields')
+f(22,27,1,1,'java/io/ObjectInputStream.readObject0')
+f(23,27,1,1,'java/io/ObjectInputStream.readEnum')
+f(24,27,1,1,'java/io/ObjectInputStream.readString')
+f(25,27,1,1,'java/io/ObjectInputStream$BlockDataInputStream.readUTF')
+f(26,27,1,1,'java/io/ObjectInputStream$BlockDataInputStream.readUTFBody')
+f(27,27,1,6,'java/io/ObjectInputStream$BlockDataInputStream.readUTFSpan',0,1,0)
+f(2,28,1,1,'org/openjdk/jmh/runner/link/BinaryLinkServer$Handler.handleHandshake')
+f(3,28,1,1,'java/io/ObjectOutputStream.writeObject')
+f(4,28,1,1,'java/io/ObjectOutputStream.writeObject0')
+f(5,28,1,1,'java/io/ObjectOutputStream.writeOrdinaryObject')
+f(6,28,1,1,'java/io/ObjectOutputStream.writeSerialData')
+f(7,28,1,1,'java/io/ObjectOutputStream.defaultWriteFields')
+f(8,28,1,1,'java/io/ObjectOutputStream.writeObject0')
+f(9,28,1,1,'java/io/ObjectOutputStream.writeOrdinaryObject')
+f(10,28,1,1,'java/io/ObjectOutputStream.writeSerialData')
+f(11,28,1,1,'java/io/ObjectOutputStream.defaultWriteFields')
+f(12,28,1,1,'java/io/ObjectOutputStream.writeObject0')
+f(13,28,1,1,'java/io/ObjectStreamClass.lookup')
+f(14,28,1,1,'java/io/ObjectStreamClass.<init>')
+f(15,28,1,1,'java/security/AccessController.doPrivileged')
+f(16,28,1,1,'java/io/ObjectStreamClass$3.run')
+f(17,28,1,1,'java/io/ObjectStreamClass$3.run')
+f(18,28,1,1,'java/io/ObjectStreamClass.access$1700')
+f(19,28,1,1,'java/io/ObjectStreamClass.getPrivateMethod')
+f(20,28,1,1,'java/lang/Class.getDeclaredMethod')
+f(21,28,1,1,'java/lang/Class.privateGetDeclaredMethods')
+f(22,28,1,0,'java/lang/Class.getDeclaredMethods0',0,0,1)
+f(23,28,1,3,'JVM_GetClassDeclaredMethods')
+f(24,28,1,4,'methodHandle::methodHandle(methodHandle const&)')
+f(2,29,3,1,'org/openjdk/jmh/runner/link/BinaryLinkServer$Handler.handleInfra')
+f(3,29,3,1,'java/io/ObjectOutputStream.writeObject')
+f(4,29,3,1,'java/io/ObjectOutputStream.writeObject0')
+f(5,29,2,1,'java/io/ObjectOutputStream.writeOrdinaryObject')
+f(6,29,2,1,'java/io/ObjectOutputStream.writeSerialData')
+f(7,29,2,1,'java/io/ObjectOutputStream.defaultWriteFields')
+f(8,29,2,1,'java/io/ObjectOutputStream.writeObject0')
+f(9,29,2,1,'java/io/ObjectOutputStream.writeOrdinaryObject')
+f(10,29,2,1,'java/io/ObjectOutputStream.writeSerialData')
+f(11,29,2,1,'java/io/ObjectOutputStream.defaultWriteFields')
+f(12,29,2,1,'java/io/ObjectOutputStream.writeObject0')
+f(13,29,2,1,'java/io/ObjectOutputStream.writeOrdinaryObject')
+f(14,29,2,1,'java/io/ObjectOutputStream.writeSerialData')
+f(15,29,2,1,'java/io/ObjectStreamClass.invokeWriteObject')
+f(16,29,2,1,'java/lang/reflect/Method.invoke')
+f(17,29,2,1,'sun/reflect/DelegatingMethodAccessorImpl.invoke')
+f(18,29,2,1,'sun/reflect/NativeMethodAccessorImpl.invoke')
+f(19,29,2,1,'sun/reflect/NativeMethodAccessorImpl.invoke0')
+f(20,29,2,1,'java/util/ArrayList.writeObject')
+f(21,29,2,1,'java/io/ObjectOutputStream.writeObject')
+f(22,29,2,1,'java/io/ObjectOutputStream.writeObject0')
+f(23,29,2,1,'java/io/ObjectOutputStream.writeOrdinaryObject')
+f(24,29,2,1,'java/io/ObjectOutputStream.writeSerialData')
+f(25,29,2,1,'java/io/ObjectOutputStream.defaultWriteFields')
+f(26,29,2,1,'java/io/ObjectOutputStream.writeObject0')
+f(27,29,1,1,'java/io/ObjectOutputStream.writeOrdinaryObject')
+f(28,29,1,1,'java/io/ObjectOutputStream.writeSerialData')
+f(29,29,1,1,'java/io/ObjectOutputStream.defaultWriteFields')
+f(30,29,1,1,'java/io/ObjectOutputStream.writeObject0')
+f(31,29,1,1,'java/io/ObjectOutputStream.writeOrdinaryObject')
+f(32,29,1,1,'java/io/ObjectOutputStream.writeSerialData')
+f(33,29,1,1,'java/io/ObjectOutputStream.defaultWriteFields')
+f(34,29,1,1,'java/io/ObjectOutputStream.writeObject0')
+f(35,29,1,1,'java/io/ObjectStreamClass.lookup')
+f(36,29,1,1,'java/io/ObjectStreamClass.<init>')
+f(37,29,1,1,'java/security/AccessController.doPrivileged')
+f(38,29,1,1,'java/io/ObjectStreamClass$3.run')
+f(39,29,1,1,'java/io/ObjectStreamClass$3.run')
+f(40,29,1,1,'java/io/ObjectStreamClass.access$1500')
+f(41,29,1,1,'java/io/ObjectStreamClass.getSerializableConstructor')
+f(42,29,1,1,'sun/reflect/ReflectionFactory.newConstructorForSerialization')
+f(43,29,1,1,'sun/reflect/ReflectionFactory.generateConstructor')
+f(44,29,1,1,'sun/reflect/MethodAccessorGenerator.generateSerializationConstructor')
+f(45,29,1,1,'sun/reflect/MethodAccessorGenerator.generate')
+f(46,29,1,1,'sun/reflect/AccessorGenerator.emitConstructor')
+f(47,29,1,0,'sun/reflect/AccessorGenerator.emitMethod',0,0,1)
+f(27,30,1,1,'java/io/ObjectStreamClass.lookup')
+f(28,30,1,1,'java/io/ObjectStreamClass.<init>')
+f(29,30,1,1,'java/io/ObjectStreamClass.lookup')
+f(30,30,1,1,'java/io/ObjectStreamClass.<init>')
+f(31,30,1,1,'java/io/ObjectStreamClass.lookup')
+f(32,30,1,1,'java/io/ObjectStreamClass.<init>')
+f(33,30,1,1,'java/io/ObjectStreamClass.getReflector')
+f(34,30,1,0,'java/io/ObjectStreamClass.matchFields',0,0,1)
+f(5,31,1,1,'java/io/ObjectStreamClass.lookup')
+f(6,31,1,1,'java/io/ObjectStreamClass.<init>')
+f(7,31,1,1,'java/security/AccessController.doPrivileged')
+f(8,31,1,1,'java/io/ObjectStreamClass$3.run')
+f(9,31,1,1,'java/io/ObjectStreamClass$3.run')
+f(10,31,1,1,'java/io/ObjectStreamClass.access$1500')
+f(11,31,1,1,'java/io/ObjectStreamClass.getSerializableConstructor')
+f(12,31,1,1,'sun/reflect/ReflectionFactory.newConstructorForSerialization')
+f(13,31,1,1,'sun/reflect/ReflectionFactory.generateConstructor')
+f(14,31,1,1,'sun/reflect/MethodAccessorGenerator.generateSerializationConstructor')
+f(15,31,1,1,'sun/reflect/MethodAccessorGenerator.generate')
+f(16,31,1,1,'java/security/AccessController.doPrivileged')
+f(17,31,1,1,'sun/reflect/MethodAccessorGenerator$1.run')
+f(18,31,1,1,'sun/reflect/MethodAccessorGenerator$1.run')
+f(19,31,1,1,'java/lang/Class.newInstance')
+f(20,31,1,1,'java/lang/Class.getConstructor0')
+f(21,31,1,1,'sun/reflect/ReflectionFactory.copyConstructor')
+f(22,31,1,1,'java/lang/reflect/ReflectAccess.copyConstructor')
+f(23,31,1,0,'java/lang/reflect/Constructor.copy',0,0,1)
+f(2,32,2,1,'org/openjdk/jmh/runner/link/BinaryLinkServer$Handler.handleOutputFormat')
+f(3,32,2,1,'java/lang/reflect/Method.invoke')
+f(4,32,2,1,'sun/reflect/DelegatingMethodAccessorImpl.invoke')
+f(5,32,2,1,'sun/reflect/NativeMethodAccessorImpl.invoke')
+f(6,32,2,1,'sun/reflect/NativeMethodAccessorImpl.invoke0')
+f(7,32,2,1,'org/openjdk/jmh/runner/format/TextReportFormat.iterationResult')
+f(8,32,1,1,'java/lang/String.format')
+f(9,32,1,1,'java/util/Formatter.format')
+f(10,32,1,1,'java/util/Formatter.format')
+f(11,32,1,1,'java/util/Formatter.parse')
+f(12,32,1,1,'java/util/Formatter$FormatSpecifier.<init>')
+f(13,32,1,0,'java/util/Formatter$FormatSpecifier.checkText',0,0,1)
+f(8,33,1,1,'org/openjdk/jmh/results/Result.toString')
+f(9,33,1,1,'org/openjdk/jmh/util/ScoreFormatter.format')
+f(10,33,1,1,'java/lang/String.format')
+f(11,33,1,1,'java/util/Formatter.format')
+f(12,33,1,1,'java/util/Formatter.format')
+f(13,33,1,1,'java/util/Formatter.parse')
+f(14,33,1,1,'java/util/regex/Matcher.find')
+f(15,33,1,0,'java/util/regex/Matcher.search',0,0,1)
+f(1,34,53,3,'start_thread')
+f(2,34,53,3,'java_start(Thread*)')
+f(3,34,53,4,'JavaThread::thread_main_inner()')
+f(4,34,53,4,'CompileBroker::compiler_thread_loop()')
+f(5,34,1,4,'CompileBroker::init_compiler_runtime()')
+f(6,34,1,4,'C2Compiler::initialize()')
+f(7,34,1,4,'C2Compiler::init_c2_runtime()')
+f(8,34,1,4,'OptoRuntime::generate(ciEnv*)')
+f(9,34,1,4,'OptoRuntime::generate_stub(ciEnv*, TypeFunc const* (*)(), unsigned char*, char const*, int, bool, bool, bool) [clone .clone.0]')
+f(10,34,1,4,'Compile::Compile(ciEnv*, TypeFunc const* (*)(), unsigned char*, char const*, int, bool, bool, bool)')
+f(11,34,1,4,'RuntimeStub::new_runtime_stub(char const*, CodeBuffer*, int, int, OopMapSet*, bool)')
+f(12,34,1,4,'Monitor::lock_without_safepoint_check()')
+f(13,34,1,4,'Monitor::ILock(Thread*)')
+f(5,35,52,4,'CompileBroker::invoke_compiler_on_method(CompileTask*)')
+f(6,35,12,4,'C2Compiler::compile_method(ciEnv*, ciMethod*, int)')
+f(7,35,12,4,'Compile::Compile(ciEnv*, C2Compiler*, ciMethod*, int, bool, bool, bool)')
+f(8,35,3,4,'Compile::Code_Gen()')
+f(9,35,3,4,'PhaseChaitin::Register_Allocate()')
+f(10,35,1,4,'IndexSetIterator::advance_and_next()')
+f(10,36,1,4,'PhaseChaitin::Simplify()')
+f(11,36,1,4,'PhaseIFG::remove_node(unsigned int)')
+f(12,36,1,4,'IndexSetIterator::advance_and_next()')
+f(10,37,1,4,'PhaseLive::compute(unsigned int)')
+f(11,37,1,4,'PhaseLive::add_liveout(Block*, IndexSet*, VectorSet&)')
+f(8,38,7,4,'Compile::Optimize()')
+f(9,38,1,4,'PhaseCCP::analyze()')
+f(10,38,1,4,'AddPNode::bottom_type() const')
+f(11,38,1,4,'Type::hashcons()')
+f(9,39,4,4,'PhaseIdealLoop::build_and_optimize(bool, bool)')
+f(10,39,2,4,'PhaseIdealLoop::build_loop_late(VectorSet&, Node_List&, Node_Stack&)')
+f(10,41,1,4,'PhaseIdealLoop::split_if_with_blocks(VectorSet&, Node_Stack&)')
+f(11,41,1,4,'PhaseIdealLoop::split_if_with_blocks_pre(Node*)')
+f(12,41,1,4,'PhaseIdealLoop::dom_lca(Node*, Node*) const')
+f(13,41,1,4,'PhaseIdealLoop::dom_lca_internal(Node*, Node*) const')
+f(10,42,1,4,'PhaseIterGVN::optimize()')
+f(11,42,1,4,'PhaseIterGVN::transform_old(Node*)')
+f(12,42,1,4,'PhiNode::Ideal(PhaseGVN*, bool)')
+f(13,42,1,4,'PhiNode::is_unsafe_data_reference(Node*) const')
+f(14,42,1,4,'PhiNode::simple_data_loop_check(Node*) const')
+f(9,43,2,4,'PhaseMacroExpand::expand_macro_nodes()')
+f(10,43,2,4,'PhaseIterGVN::optimize()')
+f(11,43,1,4,'Node::Ideal(PhaseGVN*, bool)')
+f(11,44,1,4,'PhaseIterGVN::transform_old(Node*)')
+f(12,44,1,4,'PhiNode::hash() const')
+f(13,44,1,4,'PhiNode::Opcode() const')
+f(8,45,2,4,'ParseGenerator::generate(JVMState*)')
+f(9,45,2,4,'Parse::Parse(JVMState*, ciMethod*, float)')
+f(10,45,2,4,'Parse::do_all_blocks()')
+f(11,45,2,4,'Parse::do_one_block()')
+f(12,45,2,4,'Parse::do_one_bytecode()')
+f(13,45,1,4,'Parse::do_call()')
+f(14,45,1,4,'ParseGenerator::generate(JVMState*)')
+f(15,45,1,4,'Parse::Parse(JVMState*, ciMethod*, float)')
+f(16,45,1,4,'Parse::do_all_blocks()')
+f(17,45,1,4,'Parse::do_one_block()')
+f(18,45,1,4,'Parse::do_one_bytecode()')
+f(19,45,1,4,'Parse::do_call()')
+f(20,45,1,4,'Compile::call_generator(ciMethod*, int, bool, JVMState*, bool, float, ciKlass*, bool, bool)')
+f(21,45,1,4,'InlineTree::ok_to_inline(ciMethod*, JVMState*, ciCallProfile&, WarmCallInfo*, bool&)')
+f(22,45,1,4,'InlineTree::try_to_inline(ciMethod*, ciMethod*, int, JVMState*, ciCallProfile&, WarmCallInfo*, bool&)')
+f(23,45,1,4,'InlineTree::should_not_inline(ciMethod*, ciMethod*, JVMState*, WarmCallInfo*)')
+f(24,45,1,4,'ciMethod::has_compiled_code()')
+f(25,45,1,4,'ciMethod::instructions_size()')
+f(13,46,1,4,'Parse::do_if(BoolTest::mask, Node*)')
+f(14,46,1,4,'GraphKit::uncommon_trap(int, ciKlass*, char const*, bool, bool)')
+f(15,46,1,4,'OptoRuntime::uncommon_trap_Type()')
+f(16,46,1,4,'TypeTuple::fields(unsigned int)')
+f(6,47,40,4,'Compiler::compile_method(ciEnv*, ciMethod*, int)')
+f(7,47,40,4,'Compilation::Compilation(AbstractCompiler*, ciEnv*, ciMethod*, int, BufferBlob*)')
+f(8,47,40,4,'Compilation::compile_method()')
+f(9,47,35,4,'Compilation::compile_java_method()')
+f(10,47,17,4,'Compilation::build_hir()')
+f(11,47,2,4,'GlobalValueNumbering::GlobalValueNumbering(IR*)')
+f(12,47,2,4,'BlockBegin::iterate_preorder(BlockClosure*)')
+f(13,47,2,4,'BlockBegin::iterate_preorder(boolArray&, BlockClosure*)')
+f(14,48,1,4,'BlockBegin::iterate_preorder(boolArray&, BlockClosure*)')
+f(15,48,1,4,'BlockBegin::iterate_preorder(boolArray&, BlockClosure*)')
+f(11,49,14,4,'IR::IR(Compilation*, ciMethod*, int)')
+f(12,49,1,4,'BlockListBuilder::mark_loops()')
+f(12,50,13,4,'GraphBuilder::GraphBuilder(Compilation*, IRScope*)')
+f(13,50,2,4,'BlockListBuilder::BlockListBuilder(Compilation*, IRScope*, int)')
+f(14,50,2,4,'BlockListBuilder::set_leaders()')
+f(15,50,2,4,'ciMethod::bci_block_start()')
+f(16,50,2,4,'MethodLiveness::compute_liveness()')
+f(13,52,1,4,'GraphBuilder::eliminate_redundant_phis(BlockBegin*)')
+f(14,52,1,4,'BlockBegin::iterate_preorder(BlockClosure*)')
+f(15,52,1,4,'BlockBegin::iterate_preorder(boolArray&, BlockClosure*)')
+f(16,52,1,4,'BlockBegin::iterate_preorder(boolArray&, BlockClosure*)')
+f(17,52,1,4,'BlockBegin::iterate_preorder(boolArray&, BlockClosure*)')
+f(18,52,1,4,'BlockBegin::iterate_preorder(boolArray&, BlockClosure*)')
+f(19,52,1,4,'BlockBegin::iterate_preorder(boolArray&, BlockClosure*)')
+f(20,52,1,4,'BlockBegin::iterate_preorder(boolArray&, BlockClosure*)')
+f(21,52,1,4,'BlockBegin::iterate_preorder(boolArray&, BlockClosure*)')
+f(22,52,1,4,'BlockBegin::iterate_preorder(boolArray&, BlockClosure*)')
+f(23,52,1,4,'SubstitutionResolver::block_do(BlockBegin*)')
+f(24,52,1,4,'Invoke::state_values_do(ValueVisitor*)')
+f(25,52,1,4,'ValueStack::values_do(ValueVisitor*)')
+f(26,52,1,4,'SubstitutionResolver::visit(Instruction**)')
+f(13,53,9,4,'GraphBuilder::iterate_all_blocks(bool)')
+f(14,53,9,4,'GraphBuilder::iterate_bytecodes_for_block(int)')
+f(15,53,1,4,'BlockBegin::try_merge(ValueStack*)')
+f(15,54,7,4,'GraphBuilder::invoke(Bytecodes::Code)')
+f(16,54,6,4,'GraphBuilder::try_inline(ciMethod*, bool, Bytecodes::Code, Instruction*)')
+f(17,54,6,4,'GraphBuilder::try_inline_full(ciMethod*, bool, Bytecodes::Code, Instruction*)')
+f(18,54,5,4,'GraphBuilder::iterate_all_blocks(bool)')
+f(19,54,5,4,'GraphBuilder::iterate_bytecodes_for_block(int)')
+f(20,54,5,4,'GraphBuilder::invoke(Bytecodes::Code)')
+f(21,54,4,4,'GraphBuilder::try_inline(ciMethod*, bool, Bytecodes::Code, Instruction*)')
+f(22,54,4,4,'GraphBuilder::try_inline_full(ciMethod*, bool, Bytecodes::Code, Instruction*)')
+f(23,54,4,4,'GraphBuilder::iterate_all_blocks(bool)')
+f(24,54,4,4,'GraphBuilder::iterate_bytecodes_for_block(int)')
+f(25,54,4,4,'GraphBuilder::invoke(Bytecodes::Code)')
+f(26,54,2,4,'GraphBuilder::try_inline(ciMethod*, bool, Bytecodes::Code, Instruction*)')
+f(27,54,1,4,'GraphBuilder::print_inlining(ciMethod*, char const*, bool)')
+f(28,54,1,4,'ciMethod::has_option(char const*)')
+f(29,54,1,4,'CompilerOracle::has_option_string(methodHandle, char const*)')
+f(27,55,1,4,'GraphBuilder::try_inline_full(ciMethod*, bool, Bytecodes::Code, Instruction*)')
+f(28,55,1,4,'GraphBuilder::iterate_all_blocks(bool)')
+f(29,55,1,4,'GraphBuilder::iterate_bytecodes_for_block(int)')
+f(30,55,1,4,'Instruction::as_Local()')
+f(26,56,2,4,'ciBytecodeStream::get_method(bool&, ciSignature**)')
+f(27,56,2,4,'ciEnv::get_method_by_index(constantPoolHandle, int, Bytecodes::Code, ciInstanceKlass*)')
+f(28,56,2,4,'ciEnv::get_method_by_index_impl(constantPoolHandle, int, Bytecodes::Code, ciInstanceKlass*)')
+f(29,56,1,4,'ciEnv::lookup_method(InstanceKlass*, InstanceKlass*, Symbol*, Symbol*, Bytecodes::Code)')
+f(30,56,1,4,'LinkResolver::resolve_special_call_or_null(KlassHandle, Symbol*, Symbol*, KlassHandle, bool)')
+f(31,56,1,4,'LinkResolver::resolve_special_call(CallInfo&, Handle, KlassHandle, Symbol*, Symbol*, KlassHandle, bool, Thread*)')
+f(32,56,1,4,'LinkResolver::runtime_resolve_special_method(CallInfo&, methodHandle, KlassHandle, KlassHandle, Handle, bool, Thread*)')
+f(33,56,1,4,'CallInfo::set_static(KlassHandle, methodHandle, Thread*)')
+f(29,57,1,4,'ciObjectFactory::get_metadata(Metadata*)')
+f(30,57,1,4,'ciObjectFactory::create_new_metadata(Metadata*)')
+f(31,57,1,4,'ciMethod::ciMethod(methodHandle, ciInstanceKlass*)')
+f(32,57,1,4,'Monitor::lock(Thread*)')
+f(33,57,1,4,'Monitor::ILock(Thread*)')
+f(34,57,1,3,'SpinPause')
+f(21,58,1,4,'ciBytecodeStream::get_method(bool&, ciSignature**)')
+f(22,58,1,4,'ciEnv::get_method_by_index(constantPoolHandle, int, Bytecodes::Code, ciInstanceKlass*)')
+f(23,58,1,4,'ciEnv::get_method_by_index_impl(constantPoolHandle, int, Bytecodes::Code, ciInstanceKlass*)')
+f(24,58,1,4,'ciObjectFactory::get_metadata(Metadata*)')
+f(25,58,1,4,'ciObjectFactory::create_new_metadata(Metadata*)')
+f(26,58,1,4,'ciMethod::ciMethod(methodHandle, ciInstanceKlass*)')
+f(27,58,1,4,'ciSignature::ciSignature(ciKlass*, constantPoolHandle, ciSymbol*)')
+f(28,58,1,4,'ciEnv::get_klass_by_name_impl(ciKlass*, constantPoolHandle, ciSymbol*, bool)')
+f(29,58,1,4,'SystemDictionary::find_constrained_instance_or_array_klass(Symbol*, Handle, Thread*)')
+f(30,58,1,4,'SystemDictionary::find_instance_or_array_klass(Symbol*, Handle, Handle, Thread*)')
+f(31,58,1,4,'SystemDictionary::find(Symbol*, Handle, Handle, Thread*)')
+f(32,58,1,4,'Dictionary::find(int, unsigned int, Symbol*, ClassLoaderData*, Handle, Thread*)')
+f(18,59,1,4,'ciMethod::ensure_method_data()')
+f(19,59,1,4,'Thread::current()')
+f(16,60,1,4,'ciBytecodeStream::get_method(bool&, ciSignature**)')
+f(17,60,1,4,'ciEnv::get_method_by_index(constantPoolHandle, int, Bytecodes::Code, ciInstanceKlass*)')
+f(18,60,1,4,'ciEnv::get_method_by_index_impl(constantPoolHandle, int, Bytecodes::Code, ciInstanceKlass*)')
+f(19,60,1,4,'ciEnv::lookup_method(InstanceKlass*, InstanceKlass*, Symbol*, Symbol*, Bytecodes::Code)')
+f(20,60,1,4,'LinkResolver::linktime_resolve_virtual_method_or_null(KlassHandle, Symbol*, Symbol*, KlassHandle, bool)')
+f(21,60,1,4,'LinkResolver::linktime_resolve_virtual_method(methodHandle&, KlassHandle, Symbol*, Symbol*, KlassHandle, bool, Thread*)')
+f(22,60,1,4,'LinkResolver::resolve_method(methodHandle&, KlassHandle, Symbol*, Symbol*, KlassHandle, bool, bool, Thread*)')
+f(23,60,1,4,'LinkResolver::lookup_method_in_klasses(methodHandle&, KlassHandle, Symbol*, Symbol*, bool, bool, Thread*)')
+f(24,60,1,4,'InstanceKlass::uncached_lookup_method(Symbol*, Symbol*, Klass::OverpassLookupMode) const')
+f(25,60,1,4,'InstanceKlass::find_method_index(Array<Method*>*, Symbol*, Symbol*, Klass::OverpassLookupMode, Klass::StaticLookupMode, Klass::PrivateLookupMode)')
+f(15,61,1,4,'MethodData::profile_return()')
+f(13,62,1,4,'GraphBuilder::state_at_entry()')
+f(11,63,1,4,'RangeCheckElimination::eliminate(IR*)')
+f(12,63,1,4,'RangeCheckEliminator::calc_bounds(BlockBegin*, BlockBegin*)')
+f(13,63,1,4,'RangeCheckEliminator::calc_bounds(BlockBegin*, BlockBegin*)')
+f(14,63,1,4,'RangeCheckEliminator::calc_bounds(BlockBegin*, BlockBegin*)')
+f(15,63,1,4,'RangeCheckEliminator::process_access_indexed(BlockBegin*, BlockBegin*, AccessIndexed*)')
+f(16,63,1,4,'RangeCheckEliminator::get_bound(Instruction*)')
+f(17,63,1,4,'RangeCheckEliminator::Visitor::do_ArithmeticOp(ArithmeticOp*)')
+f(18,63,1,4,'RangeCheckEliminator::get_bound(Instruction*)')
+f(19,63,1,4,'RangeCheckEliminator::Visitor::do_LogicOp(LogicOp*)')
+f(10,64,5,4,'Compilation::emit_code_body()')
+f(11,64,1,4,'Compilation::emit_code_epilog(LIR_Assembler*)')
+f(12,64,1,4,'LIR_Assembler::emit_slow_case_stubs()')
+f(13,64,1,4,'CounterOverflowStub::emit_code(LIR_Assembler*)')
+f(14,64,1,4,'LIR_Assembler::add_call_info(int, CodeEmitInfo*)')
+f(15,64,1,4,'CodeEmitInfo::record_debug_info(DebugInformationRecorder*, int)')
+f(16,64,1,4,'DebugInformationRecorder::describe_scope(int, ciMethod*, int, bool, bool, bool, DebugToken*, DebugToken*, DebugToken*)')
+f(17,64,1,4,'DebugInformationRecorder::find_sharable_decode_offset(int)')
+f(11,65,3,4,'LIR_Assembler::emit_code(BlockList*)')
+f(12,65,1,4,'LIR_Assembler::emit_op1(LIR_Op1*)')
+f(13,65,1,4,'LIR_Assembler::mem2reg(LIR_OprDesc*, LIR_OprDesc*, BasicType, LIR_PatchCode, CodeEmitInfo*, bool, bool)')
+f(14,65,1,4,'LIR_Assembler::add_debug_info_for_null_check_here(CodeEmitInfo*)')
+f(12,66,1,4,'LIR_Assembler::emit_profile_call(LIR_OpProfileCall*)')
+f(13,66,1,4,'Assembler::addq(Address, int)')
+f(14,66,1,4,'Assembler::emit_data(int, RelocationHolder const&, int)')
+f(12,67,1,4,'LIR_Assembler::process_debug_info(LIR_Op*)')
+f(13,67,1,4,'LIR_Assembler::record_non_safepoint_debug_info()')
+f(11,68,1,4,'LIR_Op1::emit_code(LIR_Assembler*)')
+f(10,69,13,4,'Compilation::emit_lir()')
+f(11,69,1,4,'BlockList::iterate_forward(BlockClosure*)')
+f(12,69,1,4,'LIRGenerator::block_do(BlockBegin*)')
+f(13,69,1,4,'LIRGenerator::do_ProfileInvoke(ProfileInvoke*)')
+f(14,69,1,4,'LIRGenerator::state_for(Instruction*, ValueStack*, bool)')
+f(11,70,12,4,'LinearScan::do_linear_scan()')
+f(12,70,1,4,'LIRGenerator::is_vreg_flag_set(int, LIRGenerator::VregFlag)')
+f(12,71,2,4,'LinearScan::allocate_registers()')
+f(13,71,1,4,'IntervalWalker::walk_to(int)')
+f(14,71,1,4,'IntervalWalker::walk_to(IntervalState, int)')
+f(13,72,1,4,'LIR_List::append(LIR_InsertionBuffer*)')
+f(12,73,1,4,'LinearScan::assign_reg_num()')
+f(13,73,1,4,'LinearScan::assign_reg_num(LIR_OpList*, IntervalWalker*)')
+f(14,73,1,4,'LinearScan::calc_operand_for_interval(Interval const*)')
+f(12,74,5,4,'LinearScan::build_intervals()')
+f(13,76,1,4,'Instruction::as_Constant()')
+f(13,77,2,4,'LinearScan::use_kind_of_input_operand(LIR_Op*, LIR_OprDesc*)')
+f(12,79,3,4,'LinearScan::compute_local_live_sets()')
+f(9,82,5,4,'Compilation::install_code(int)')
+f(10,82,5,4,'ciEnv::register_method(ciMethod*, int, CodeOffsets*, int, CodeBuffer*, int, OopMapSet*, ExceptionHandlerTable*, ImplicitExceptionTable*, AbstractCompiler*, int, bool, bool, RTMState)')
+f(11,82,1,4,'ciEnv::validate_compile_task_dependencies(ciMethod*)')
+f(12,82,1,4,'Dependencies::DepStream::check_klass_dependency(KlassDepChange*)')
+f(13,82,1,4,'Dependencies::check_valid_dependency_type(Dependencies::DepType)')
+f(11,83,4,4,'nmethod::new_nmethod(methodHandle, int, int, CodeOffsets*, int, DebugInformationRecorder*, Dependencies*, CodeReviveOptRecords*, CodeBuffer*, int, OopMapSet*, ExceptionHandlerTable*, ImplicitExceptionTable*, AbstractCompiler*, int)')
+f(12,83,4,4,'nmethod::nmethod(Method*, int, int, int, CodeOffsets*, int, DebugInformationRecorder*, Dependencies*, CodeReviveOptRecords*, CodeBuffer*, int, OopMapSet*, ExceptionHandlerTable*, ImplicitExceptionTable*, AbstractCompiler*, int)')
+f(13,83,3,4,'CodeBlob::CodeBlob(char const*, CodeBuffer*, int, int, int, int, OopMapSet*)')
+f(14,83,3,4,'CodeBuffer::copy_code_to(CodeBlob*)')
+f(15,83,2,4,'CodeBuffer::relocate_code_to(CodeBuffer*) const')
+f(16,84,1,4,'Assembler::locate_operand(unsigned char*, Assembler::WhichOperand)')
+f(15,85,1,4,'RelocIterator::advance_over_prefix()')
+f(13,86,1,4,'nmethod::copy_values(GrowableArray<_jobject*>*)')
+f(1,87,1,1,'sun/launcher/LauncherHelper.checkAndLoadMain')
+f(2,87,1,1,'java/lang/ClassLoader.loadClass')
+f(3,87,1,1,'sun/misc/Launcher$AppClassLoader.loadClass')
+f(4,87,1,1,'java/lang/ClassLoader.loadClass')
+f(5,87,1,1,'java/net/URLClassLoader.findClass')
+f(6,87,1,1,'java/security/AccessController.doPrivileged')
+f(7,87,1,1,'java/net/URLClassLoader$1.run')
+f(8,87,1,1,'java/net/URLClassLoader$1.run')
+f(9,87,1,1,'java/net/URLClassLoader.access$100')
+f(10,87,1,1,'java/net/URLClassLoader.defineClass')
+f(11,87,1,1,'java/security/SecureClassLoader.defineClass')
+f(12,87,1,1,'java/security/SecureClassLoader.getProtectionDomain')
+f(13,87,1,1,'sun/misc/Launcher$AppClassLoader.getPermissions')
+f(14,87,1,1,'java/net/URLClassLoader.getPermissions')
+f(15,87,1,1,'java/net/URL.openConnection')
+f(16,87,1,1,'sun/net/www/protocol/file/Handler.openConnection')
+f(17,87,1,1,'sun/net/www/protocol/file/Handler.openConnection')
+f(18,87,1,0,'sun/net/www/protocol/file/Handler.createFileURLConnection',0,0,1)
+f(19,87,1,4,'InterpreterRuntime::_new(JavaThread*, ConstantPool*, int)')
+f(20,87,1,4,'ConstantPool::klass_at_impl(constantPoolHandle, int, Thread*)')
+f(21,87,1,4,'SystemDictionary::resolve_or_fail(Symbol*, Handle, Handle, bool, Thread*)')
+f(22,87,1,4,'SystemDictionary::resolve_instance_class_or_null(Symbol*, Handle, Handle, Thread*)')
+f(23,87,1,4,'SystemDictionary::load_instance_class(Symbol*, Handle, Thread*)')
+f(24,87,1,4,'SystemDictionary::load_shared_class(instanceKlassHandle, Handle, Handle, Thread*)')
+f(25,87,1,4,'SystemDictionary::resolve_super_or_fail(Symbol*, Symbol*, Handle, Handle, bool, Thread*)')
+f(26,87,1,4,'SystemDictionary::resolve_instance_class_or_null(Symbol*, Handle, Handle, Thread*)')
+f(27,87,1,4,'SystemDictionary::load_instance_class(Symbol*, Handle, Thread*)')
+f(28,87,1,4,'SystemDictionary::load_shared_class(instanceKlassHandle, Handle, Handle, Thread*)')
+f(29,87,1,4,'SystemDictionary::resolve_super_or_fail(Symbol*, Symbol*, Handle, Handle, bool, Thread*)')
+f(30,87,1,4,'SystemDictionary::resolve_instance_class_or_null(Symbol*, Handle, Handle, Thread*)')
+f(31,87,1,4,'SystemDictionary::load_instance_class(Symbol*, Handle, Thread*)')
+f(32,87,1,4,'SystemDictionary::load_shared_class(instanceKlassHandle, Handle, Handle, Thread*)')
+f(33,87,1,4,'InstanceKlass::restore_unshareable_info(ClassLoaderData*, Handle, Thread*)')
+f(34,87,1,4,'Method::restore_unshareable_info(Thread*)')
+f(35,87,1,4,'Method::link_method(methodHandle, Thread*)')
+f(36,87,1,4,'Method::make_adapters(methodHandle, Thread*)')
+f(37,87,1,4,'AdapterHandlerLibrary::get_adapter(methodHandle)')
+
+search();
+</script></body></html>

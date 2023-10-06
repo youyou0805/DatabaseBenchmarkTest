@@ -9,11 +9,11 @@
 **进度**：目前已经完成了JHM测试代码的编写，输出了测试结果与火焰图。
 
 - **2023年9月19日更新火焰图**
+- **2023年10月7日更新新应用场景下测试用例结果分析**
 
 **待完成**：
 
-1. 设计测试用例，探究（FixedThreadPool，ForkJoinPool）在什么实际场景下具有区别于另一调度器的的性能，并探究原因。
-2. 尝试分析火焰图。
+- 读懂火焰图
 
 **代码实现**
 
@@ -162,3 +162,126 @@ ForkJoinPool适用于递归任务和分治算法，例如大规模数据处理�
 
 ![image-20230919134823278](https://cdn.jsdelivr.net/gh/youyou0805/pictures/2023/09/image-20230919134823278-f2ec83.png)
 
+------
+
+```
+package com.example.benchmark;
+
+import org.openjdk.jmh.annotations.*;
+
+import java.util.concurrent.*;
+
+@Fork(1)
+@Warmup(iterations = 3, time = 5)
+@Measurement(iterations = 5, time = 5)
+@State(Scope.Benchmark)
+@BenchmarkMode(Mode.AverageTime)
+@OutputTimeUnit(TimeUnit.MILLISECONDS)
+public class DatabaseBenchmarkTest {
+    @Param({"1","2"})
+    private int testOption;
+
+    @Param({"100","1000"})
+    private int threadCount;
+
+    @Param({"1000","10000"})
+    private int taskCount;
+
+    private ExecutorService dbExecutor;
+
+    @Setup(Level.Trial)
+    public void setup() {
+        if (testOption == 1) {
+            dbExecutor = Executors.newFixedThreadPool(threadCount);
+        } else if (testOption == 2) {
+            dbExecutor = new ForkJoinPool(threadCount);
+        } else {
+            throw new IllegalArgumentException("Invalid test option: " + testOption);
+        }
+    }
+
+    @TearDown(Level.Trial)
+    public void teardown() {
+        dbExecutor.shutdown();
+        try {
+            if (!dbExecutor.awaitTermination(1, TimeUnit.MINUTES)) {
+                dbExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+            dbExecutor.shutdownNow();
+        }
+    }
+
+    @Benchmark
+    public void testHeavyCpuTask() throws InterruptedException {
+        CountDownLatch latch = new CountDownLatch(taskCount);
+        for(int i = 0; i < taskCount; i++) {
+            CompletableFuture<Void> cf = CompletableFuture.runAsync(() -> {
+                try {
+                    Thread.ofVirtual().scheduler(dbExecutor).start(() -> {
+                        longRunningTask();
+                        latch.countDown();
+                    });
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            });
+        }
+        //等待所有任务完成
+        latch.await();
+    }
+
+    public void heavyCpuTask() {
+        // 执行计算密集型任务
+        for (int i = 0; i < 1000000; i++) {
+            Math.sqrt(i);
+        }
+    }
+
+    public void longRunningTask() {
+        // 模拟长时间运行的任务，例如睡眠5秒
+        try {
+            Thread.sleep(5000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+以上代码是一个基准测试类，通过JMH框架进行性能测试。它包括了不同的基准测试选项、线程数量和任务数量，并使用线程池执行任务。其中包含了CPU密集型任务和模拟长时间运行的任务。通过运行基准测试可以评估和比较不同配置下的性能表现。
+
+------
+
+
+FixedThreadPool和ForkJoinPool作为协程调度器时的对比分析总结：
+
+FixedThreadPool作为协程调度器的情况：
+
+1. 并发性：FixedThreadPool作为协程调度器可以提供并发执行协程的能力，类似于多线程的并发执行模型。
+2. 线程数量固定：FixedThreadPool作为协程调度器时，采用固定数量线程模型，每个线程独立执行任务，线程上下文切换开销小。
+3. 资源利用：由于线程数量固定，无法根据协程的数量进行动态调整，可能存在线程资源浪费或协程等待的情况，特别是当协程数量超过线程数量时。
+4. 适用性：FixedThreadPool作为协程调度器适用于需要并发执行的协程任务，但适用性相对较窄，不支持协程的轻量级和非阻塞特性。
+
+ForkJoinPool作为协程调度器的情况：
+
+1. 任务拆分与并行执行：ForkJoinPool作为协程调度器可以将大任务拆分为小任务并行执行，类似于协程的任务拆分和并发执行模型。
+2. 动态负载平衡：ForkJoinPool使用工作窃取算法，允许线程间交换和执行任务，但上下文切换开销较大。在任务执行过程中可以动态调整线程的负载，提高并行性能。
+3. 适应性：ForkJoinPool作为协程调度器适用于递归任务和可拆分的任务，能够以更细粒度的方式进行任务调度和并行计算。
+4. 资源利用：由于工作窃取算法的负载平衡机制，ForkJoinPool可以更高效地利用线程资源，避免资源浪费和任务等待的情况。
+
+总结：
+
+- FixedThreadPool作为协程调度器提供并发执行协程的能力，但无法动态调整线程数量，可能存在资源利用问题。
+
+- ForkJoinPool作为协程调度器具有任务拆分、并行执行和动态负载平衡的能力，适用于递归和可拆分的任务，并能更高效地利用线程资源。
+
+- 总体性能
+
+  CPU密集任务:FixedThreadPool更适用于CPU密集任务，利用多核高效执行，性能优良。
+
+  IO密集任务:ForkJoinPool工作窃取能力处理横向切分的任务、IO密集任务更有效率，更好利用率。
+
+
+在选择使用FixedThreadPool还是ForkJoinPool作为协程调度器时，需要考虑任务的特性、并发需求和资源利用要求。同时，还应注意协程调度器的实验性质，并在实际使用中进行测试和评估。
